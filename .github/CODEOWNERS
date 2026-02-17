@@ -1,0 +1,21 @@
+# Default owner for all files
+* @redf0x1
+
+# High-risk surfaces
+/src/security/** @redf0x1
+/src/runtime/** @redf0x1
+/src/memory/** @redf0x1
+/.github/** @redf0x1
+/Cargo.toml @redf0x1
+/Cargo.lock @redf0x1
+
+# CI
+/.github/workflows/**  @chumyin
+
+# Docs & governance
+/docs/**                @chumyin
+/AGENTS.md              @chumyin
+/CONTRIBUTING.md        @chumyin
+/docs/pr-workflow.md    @chumyin
+/docs/reviewer-playbook.md @chumyin
+/docs/ci-map.md         @chumyin
