@@ -66,7 +66,7 @@ struct SkillMeta {
 }
 
 fn default_version() -> String {
-    "0.1.0".to_string()
+    "1.0.0".to_string()
 }
 
 /// Load all skills from the workspace skills directory
@@ -316,7 +316,7 @@ fn load_skill_md(path: &Path, dir: &Path) -> Result<Skill> {
     Ok(Skill {
         name,
         description: extract_description(&content),
-        version: "0.1.0".to_string(),
+        version: "1.0.0".to_string(),
         author: None,
         tags: Vec::new(),
         tools: Vec::new(),
@@ -411,7 +411,7 @@ pub fn init_skills_dir(workspace_dir: &Path) -> Result<()> {
              [skill]\n\
              name = \"my-skill\"\n\
              description = \"What this skill does\"\n\
-             version = \"0.1.0\"\n\
+             version = \"1.0.0\"\n\
              author = \"your-name\"\n\
              tags = [\"productivity\", \"automation\"]\n\n\
              [[tools]]\n\
@@ -838,7 +838,7 @@ description = "Bare minimum"
 
         let skills = load_skills(dir.path());
         assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].version, "0.1.0"); // default version
+        assert_eq!(skills[0].version, "1.0.0"); // default version
         assert!(skills[0].author.is_none());
         assert!(skills[0].tags.is_empty());
         assert!(skills[0].tools.is_empty());
