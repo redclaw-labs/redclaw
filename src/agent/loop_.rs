@@ -1,6 +1,9 @@
 use crate::config::Config;
+use crate::cost::{BudgetCheck, CostTracker, TokenUsage};
+use crate::errors::TOOL_PERMISSION_DENIED;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::observability::{self, Observer, ObserverEvent};
+use crate::policy::{PolicyAction, PolicyEngine};
 use crate::providers::{self, ChatMessage, Provider, ToolCall};
 use crate::runtime;
 use crate::security::SecurityPolicy;
@@ -26,6 +29,20 @@ const COMPACTION_MAX_SOURCE_CHARS: usize = 12_000;
 
 /// Max characters retained in stored compaction summary.
 const COMPACTION_MAX_SUMMARY_CHARS: usize = 2_000;
+
+fn estimate_tokens(text: &str) -> u64 {
+    // Cheap heuristic used when providers don't return exact token counts.
+    // ~4 chars/token is a common coarse approximation for English.
+    let chars = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+    chars.div_ceil(4)
+}
+
+fn estimate_input_tokens(history: &[ChatMessage]) -> u64 {
+    history
+        .iter()
+        .map(|m| estimate_tokens(m.content.as_str()))
+        .sum()
+}
 
 fn autosave_memory_key(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
@@ -79,6 +96,7 @@ async fn auto_compact_history(
     history: &mut Vec<ChatMessage>,
     provider: &dyn Provider,
     model: &str,
+    cost_tracker: Option<&CostTracker>,
 ) -> Result<bool> {
     let has_system = history.first().map_or(false, |m| m.role == "system");
     let non_system_count = if has_system {
@@ -109,13 +127,79 @@ async fn auto_compact_history(
         transcript
     );
 
-    let summary_raw = provider
+    if let Some(tracker) = cost_tracker {
+        let input_tokens = estimate_tokens(summarizer_system) + estimate_tokens(&summarizer_user);
+        let (input_price, _output_price) = tracker.model_pricing_usd_per_million(model);
+        let estimated_cost_usd = (input_tokens as f64 / 1_000_000.0) * input_price;
+        if let BudgetCheck::Exceeded {
+            current_usd,
+            limit_usd,
+            period,
+        } = tracker.check_budget(estimated_cost_usd)?
+        {
+            tracing::warn!(
+                model = %model,
+                current_usd,
+                limit_usd,
+                ?period,
+                "Cost budget exceeded (preflight compaction)"
+            );
+            if tracker.auto_pause() {
+                anyhow::bail!(
+                    "[RC-6003] Cost budget exceeded. Auto-pausing ({period:?}: ${current_usd:.4}/${limit_usd:.4})."
+                );
+            }
+        }
+    }
+
+    let summary_result = provider
         .chat_with_system(Some(summarizer_system), &summarizer_user, model, 0.2)
-        .await
-        .unwrap_or_else(|_| {
+        .await;
+
+    let summary_raw = match summary_result {
+        Ok(text) => {
+            if let Some(tracker) = cost_tracker {
+                let input_tokens =
+                    estimate_tokens(summarizer_system) + estimate_tokens(&summarizer_user);
+                let output_tokens = estimate_tokens(&text);
+                let (input_price, output_price) = tracker.model_pricing_usd_per_million(model);
+                let usage = TokenUsage::new(
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    input_price,
+                    output_price,
+                );
+                let budget_check = tracker.check_budget(usage.cost_usd)?;
+                tracker.record_usage(usage)?;
+                if let BudgetCheck::Exceeded {
+                    current_usd,
+                    limit_usd,
+                    period,
+                } = budget_check
+                {
+                    tracing::warn!(
+                        model = %model,
+                        current_usd,
+                        limit_usd,
+                        ?period,
+                        "Cost budget exceeded (compaction)"
+                    );
+                    if tracker.auto_pause() {
+                        anyhow::bail!(
+                            "[RC-6003] Cost budget exceeded. Auto-pausing ({period:?}: ${current_usd:.4}/${limit_usd:.4})."
+                        );
+                    }
+                }
+            }
+
+            text
+        }
+        Err(_error) => {
             // Fallback to deterministic local truncation when summarization fails.
             truncate_with_ellipsis(&transcript, COMPACTION_MAX_SUMMARY_CHARS)
-        });
+        }
+    };
 
     let summary = truncate_with_ellipsis(&summary_raw, COMPACTION_MAX_SUMMARY_CHARS);
     apply_compaction_summary(history, start, compact_end, &summary);
@@ -428,6 +512,9 @@ pub(crate) async fn agent_turn(
     provider_name: &str,
     model: &str,
     temperature: f64,
+    policy_engine: Option<&PolicyEngine>,
+    channel_name: Option<&str>,
+    cost_tracker: Option<Arc<CostTracker>>,
     silent: bool,
 ) -> Result<String> {
     run_tool_call_loop(
@@ -438,6 +525,9 @@ pub(crate) async fn agent_turn(
         provider_name,
         model,
         temperature,
+        policy_engine,
+        channel_name,
+        cost_tracker,
         silent,
     )
     .await
@@ -454,9 +544,60 @@ pub(crate) async fn run_tool_call_loop(
     provider_name: &str,
     model: &str,
     temperature: f64,
+    policy_engine: Option<&PolicyEngine>,
+    channel_name: Option<&str>,
+    cost_tracker: Option<Arc<CostTracker>>,
     silent: bool,
 ) -> Result<String> {
     for _iteration in 0..MAX_TOOL_ITERATIONS {
+        let estimated_prompt_tokens = cost_tracker
+            .as_deref()
+            .map(|_| estimate_input_tokens(history));
+
+        if let (Some(tracker), Some(input_tokens)) =
+            (cost_tracker.as_deref(), estimated_prompt_tokens)
+        {
+            let (input_price, _output_price) = tracker.model_pricing_usd_per_million(model);
+            let estimated_cost_usd = (input_tokens as f64 / 1_000_000.0) * input_price;
+            match tracker.check_budget(estimated_cost_usd)? {
+                BudgetCheck::Allowed => {}
+                BudgetCheck::Warning {
+                    current_usd,
+                    limit_usd,
+                    period,
+                } => {
+                    tracing::warn!(
+                        provider = %provider_name,
+                        model = %model,
+                        current_usd,
+                        limit_usd,
+                        ?period,
+                        "Cost budget warning (preflight)"
+                    );
+                }
+                BudgetCheck::Exceeded {
+                    current_usd,
+                    limit_usd,
+                    period,
+                } => {
+                    tracing::warn!(
+                        provider = %provider_name,
+                        model = %model,
+                        current_usd,
+                        limit_usd,
+                        ?period,
+                        "Cost budget exceeded (preflight)"
+                    );
+
+                    if tracker.auto_pause() {
+                        anyhow::bail!(
+                            "[RC-6003] Cost budget exceeded. Auto-pausing ({period:?}: ${current_usd:.4}/${limit_usd:.4})."
+                        );
+                    }
+                }
+            }
+        }
+
         observer.record_event(&ObserverEvent::LlmRequest {
             provider: provider_name.to_string(),
             model: model.to_string(),
@@ -491,6 +632,64 @@ pub(crate) async fn run_tool_call_loop(
         };
 
         let response_text = response;
+
+        if let Some(tracker) = cost_tracker.as_deref() {
+            let input_tokens =
+                estimated_prompt_tokens.unwrap_or_else(|| estimate_input_tokens(history));
+            let output_tokens = estimate_tokens(&response_text);
+            let (input_price, output_price) = tracker.model_pricing_usd_per_million(model);
+            let usage = TokenUsage::new(
+                model,
+                input_tokens,
+                output_tokens,
+                input_price,
+                output_price,
+            );
+
+            let budget_check = tracker.check_budget(usage.cost_usd)?;
+            tracker.record_usage(usage)?;
+
+            match budget_check {
+                BudgetCheck::Allowed => {}
+                BudgetCheck::Warning {
+                    current_usd,
+                    limit_usd,
+                    period,
+                } => {
+                    tracing::warn!(
+                        provider = %provider_name,
+                        model = %model,
+                        current_usd,
+                        limit_usd,
+                        ?period,
+                        "Cost budget warning"
+                    );
+                }
+                BudgetCheck::Exceeded {
+                    current_usd,
+                    limit_usd,
+                    period,
+                } => {
+                    tracing::warn!(
+                        provider = %provider_name,
+                        model = %model,
+                        current_usd,
+                        limit_usd,
+                        ?period,
+                        "Cost budget exceeded"
+                    );
+
+                    if tracker.auto_pause() {
+                        anyhow::bail!(
+                            "[RC-6003] Cost budget exceeded. Auto-pausing ({:?}: ${:.4}/${:.4}).",
+                            period,
+                            current_usd,
+                            limit_usd
+                        );
+                    }
+                }
+            }
+        }
         let assistant_history_content = response_text.clone();
         let (parsed_text, tool_calls) = parse_tool_calls(&response_text);
 
@@ -518,26 +717,104 @@ pub(crate) async fn run_tool_call_loop(
             });
             let start = Instant::now();
             let result = if let Some(tool) = find_tool(tools_registry, &call.name) {
-                match tool.execute(call.arguments.clone()).await {
-                    Ok(r) => {
-                        observer.record_event(&ObserverEvent::ToolCall {
-                            tool: call.name.clone(),
-                            duration: start.elapsed(),
-                            success: r.success,
-                        });
-                        if r.success {
-                            r.output
-                        } else {
-                            format!("Error: {}", r.error.unwrap_or_else(|| r.output))
+                if let Some(engine) = policy_engine {
+                    let decision = engine.evaluate(&call.name, channel_name);
+                    match decision.action {
+                        PolicyAction::Deny => {
+                            observer.record_event(&ObserverEvent::ToolCall {
+                                tool: call.name.clone(),
+                                duration: start.elapsed(),
+                                success: false,
+                            });
+                            let reason = decision.reason.unwrap_or_default();
+                            format!(
+                                "Error: {} — Tool '{}' denied by policy ({}): {}",
+                                TOOL_PERMISSION_DENIED.diagnostic(),
+                                call.name,
+                                decision.rule_source,
+                                reason
+                            )
+                        }
+                        PolicyAction::Audit => {
+                            tracing::warn!(
+                                tool = %call.name,
+                                channel = channel_name.unwrap_or("(none)"),
+                                rule = %decision.rule_source,
+                                reason = decision.reason.as_deref().unwrap_or(""),
+                                "Policy: AUDIT — tool call logged"
+                            );
+                            engine.record_call(&call.name);
+                            match tool.execute(call.arguments.clone()).await {
+                                Ok(r) => {
+                                    observer.record_event(&ObserverEvent::ToolCall {
+                                        tool: call.name.clone(),
+                                        duration: start.elapsed(),
+                                        success: r.success,
+                                    });
+                                    if r.success {
+                                        r.output
+                                    } else {
+                                        format!("Error: {}", r.error.unwrap_or_else(|| r.output))
+                                    }
+                                }
+                                Err(e) => {
+                                    observer.record_event(&ObserverEvent::ToolCall {
+                                        tool: call.name.clone(),
+                                        duration: start.elapsed(),
+                                        success: false,
+                                    });
+                                    format!("Error executing {}: {e}", call.name)
+                                }
+                            }
+                        }
+                        PolicyAction::Allow => {
+                            engine.record_call(&call.name);
+                            match tool.execute(call.arguments.clone()).await {
+                                Ok(r) => {
+                                    observer.record_event(&ObserverEvent::ToolCall {
+                                        tool: call.name.clone(),
+                                        duration: start.elapsed(),
+                                        success: r.success,
+                                    });
+                                    if r.success {
+                                        r.output
+                                    } else {
+                                        format!("Error: {}", r.error.unwrap_or_else(|| r.output))
+                                    }
+                                }
+                                Err(e) => {
+                                    observer.record_event(&ObserverEvent::ToolCall {
+                                        tool: call.name.clone(),
+                                        duration: start.elapsed(),
+                                        success: false,
+                                    });
+                                    format!("Error executing {}: {e}", call.name)
+                                }
+                            }
                         }
                     }
-                    Err(e) => {
-                        observer.record_event(&ObserverEvent::ToolCall {
-                            tool: call.name.clone(),
-                            duration: start.elapsed(),
-                            success: false,
-                        });
-                        format!("Error executing {}: {e}", call.name)
+                } else {
+                    match tool.execute(call.arguments.clone()).await {
+                        Ok(r) => {
+                            observer.record_event(&ObserverEvent::ToolCall {
+                                tool: call.name.clone(),
+                                duration: start.elapsed(),
+                                success: r.success,
+                            });
+                            if r.success {
+                                r.output
+                            } else {
+                                format!("Error: {}", r.error.unwrap_or_else(|| r.output))
+                            }
+                        }
+                        Err(e) => {
+                            observer.record_event(&ObserverEvent::ToolCall {
+                                tool: call.name.clone(),
+                                duration: start.elapsed(),
+                                success: false,
+                            });
+                            format!("Error executing {}: {e}", call.name)
+                        }
                     }
                 }
             } else {
@@ -608,6 +885,15 @@ pub async fn run(
         &config.workspace_dir,
     ));
 
+    let policy_engine = if config.policy.tools.is_empty()
+        && config.policy.channels.is_empty()
+        && config.policy.default_action == PolicyAction::Allow
+    {
+        None
+    } else {
+        Some(PolicyEngine::new(config.policy.clone()))
+    };
+
     // ── Memory (the brain) ────────────────────────────────────────
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory(
         &config.memory,
@@ -615,6 +901,15 @@ pub async fn run(
         config.api_key.as_deref(),
     )?);
     tracing::info!(backend = mem.name(), "Memory initialized");
+
+    let cost_tracker = if config.cost.enabled {
+        Some(Arc::new(CostTracker::new(
+            config.cost.clone(),
+            &config.workspace_dir,
+        )?))
+    } else {
+        None
+    };
 
     // ── Peripherals (merge peripheral tools into registry) ─
     if !peripheral_overrides.is_empty() {
@@ -842,6 +1137,9 @@ pub async fn run(
             provider_name,
             model_name,
             temperature,
+            policy_engine.as_ref(),
+            None,
+            cost_tracker.clone(),
             false,
         )
         .await?;
@@ -908,6 +1206,9 @@ pub async fn run(
                 provider_name,
                 model_name,
                 temperature,
+                policy_engine.as_ref(),
+                None,
+                cost_tracker.clone(),
                 false,
             )
             .await
@@ -922,8 +1223,13 @@ pub async fn run(
             observer.record_event(&ObserverEvent::TurnComplete);
 
             // Auto-compaction before hard trimming to preserve long-context signal.
-            if let Ok(compacted) =
-                auto_compact_history(&mut history, provider.as_ref(), model_name).await
+            if let Ok(compacted) = auto_compact_history(
+                &mut history,
+                provider.as_ref(),
+                model_name,
+                cost_tracker.as_deref(),
+            )
+            .await
             {
                 if compacted {
                     println!("🧹 Auto-compaction complete");
@@ -965,6 +1271,14 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.autonomy,
         &config.workspace_dir,
     ));
+    let policy_engine = if config.policy.tools.is_empty()
+        && config.policy.channels.is_empty()
+        && config.policy.default_action == PolicyAction::Allow
+    {
+        None
+    } else {
+        Some(PolicyEngine::new(config.policy.clone()))
+    };
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory(
         &config.memory,
         &config.workspace_dir,
@@ -1008,6 +1322,15 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.model_routes,
         &model_name,
     )?;
+
+    let cost_tracker = if config.cost.enabled {
+        Some(Arc::new(CostTracker::new(
+            config.cost.clone(),
+            &config.workspace_dir,
+        )?))
+    } else {
+        None
+    };
 
     let hardware_rag: Option<crate::rag::HardwareRag> = config
         .peripherals
@@ -1109,6 +1432,9 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         provider_name,
         &model_name,
         config.default_temperature,
+        policy_engine.as_ref(),
+        None,
+        cost_tracker,
         true,
     )
     .await

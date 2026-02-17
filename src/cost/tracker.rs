@@ -19,7 +19,7 @@ pub struct CostTracker {
 impl CostTracker {
     /// Create a new cost tracker.
     pub fn new(config: CostConfig, workspace_dir: &Path) -> Result<Self> {
-        let storage_path = resolve_storage_path(workspace_dir)?;
+        let storage_path = resolve_storage_path(&config, workspace_dir)?;
 
         let storage = CostStorage::new(&storage_path).with_context(|| {
             format!("Failed to open cost storage at {}", storage_path.display())
@@ -36,6 +36,18 @@ impl CostTracker {
     /// Get the session ID.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn auto_pause(&self) -> bool {
+        self.config.auto_pause
+    }
+
+    pub fn model_pricing_usd_per_million(&self, model: &str) -> (f64, f64) {
+        self.config
+            .prices
+            .get(model)
+            .map(|p| (p.input, p.output))
+            .unwrap_or((0.0, 0.0))
     }
 
     fn lock_storage(&self) -> Result<MutexGuard<'_, CostStorage>> {
@@ -62,47 +74,89 @@ impl CostTracker {
             ));
         }
 
+        // Per-request cap (independent of aggregates)
+        if self.config.per_request_budget_usd > 0.0
+            && estimated_cost_usd > self.config.per_request_budget_usd
+        {
+            return Ok(BudgetCheck::Exceeded {
+                current_usd: estimated_cost_usd,
+                limit_usd: self.config.per_request_budget_usd,
+                period: UsagePeriod::Request,
+            });
+        }
+
         let mut storage = self.lock_storage()?;
         let (daily_cost, monthly_cost) = storage.get_aggregated_costs()?;
 
+        let session_cost = {
+            let session_costs = self.lock_session_costs()?;
+            session_costs
+                .iter()
+                .map(|record| record.usage.cost_usd)
+                .sum::<f64>()
+        };
+
+        // Effective limits (0 = unlimited). daily_limit supports new daily_budget_usd as alias.
+        let daily_limit_usd = self.config.effective_daily_limit_usd();
+        let monthly_limit_usd = self.config.monthly_limit_usd;
+        let session_limit_usd = self.config.session_budget_usd;
+
         // Check daily limit
         let projected_daily = daily_cost + estimated_cost_usd;
-        if projected_daily > self.config.daily_limit_usd {
+        if daily_limit_usd > 0.0 && projected_daily > daily_limit_usd {
             return Ok(BudgetCheck::Exceeded {
                 current_usd: daily_cost,
-                limit_usd: self.config.daily_limit_usd,
+                limit_usd: daily_limit_usd,
                 period: UsagePeriod::Day,
             });
         }
 
         // Check monthly limit
         let projected_monthly = monthly_cost + estimated_cost_usd;
-        if projected_monthly > self.config.monthly_limit_usd {
+        if monthly_limit_usd > 0.0 && projected_monthly > monthly_limit_usd {
             return Ok(BudgetCheck::Exceeded {
                 current_usd: monthly_cost,
-                limit_usd: self.config.monthly_limit_usd,
+                limit_usd: monthly_limit_usd,
                 period: UsagePeriod::Month,
+            });
+        }
+
+        let projected_session = session_cost + estimated_cost_usd;
+        if session_limit_usd > 0.0 && projected_session > session_limit_usd {
+            return Ok(BudgetCheck::Exceeded {
+                current_usd: session_cost,
+                limit_usd: session_limit_usd,
+                period: UsagePeriod::Session,
             });
         }
 
         // Check warning thresholds
         let warn_threshold = f64::from(self.config.warn_at_percent.min(100)) / 100.0;
-        let daily_warn_threshold = self.config.daily_limit_usd * warn_threshold;
-        let monthly_warn_threshold = self.config.monthly_limit_usd * warn_threshold;
+        let daily_warn_threshold = daily_limit_usd * warn_threshold;
+        let monthly_warn_threshold = monthly_limit_usd * warn_threshold;
+        let session_warn_threshold = session_limit_usd * warn_threshold;
 
-        if projected_daily >= daily_warn_threshold {
+        if daily_limit_usd > 0.0 && projected_daily >= daily_warn_threshold {
             return Ok(BudgetCheck::Warning {
                 current_usd: daily_cost,
-                limit_usd: self.config.daily_limit_usd,
+                limit_usd: daily_limit_usd,
                 period: UsagePeriod::Day,
             });
         }
 
-        if projected_monthly >= monthly_warn_threshold {
+        if monthly_limit_usd > 0.0 && projected_monthly >= monthly_warn_threshold {
             return Ok(BudgetCheck::Warning {
                 current_usd: monthly_cost,
-                limit_usd: self.config.monthly_limit_usd,
+                limit_usd: monthly_limit_usd,
                 period: UsagePeriod::Month,
+            });
+        }
+
+        if session_limit_usd > 0.0 && projected_session >= session_warn_threshold {
+            return Ok(BudgetCheck::Warning {
+                current_usd: session_cost,
+                limit_usd: session_limit_usd,
+                period: UsagePeriod::Session,
             });
         }
 
@@ -165,6 +219,10 @@ impl CostTracker {
         })
     }
 
+    pub fn summary(&self) -> Result<CostSummary> {
+        self.get_summary()
+    }
+
     /// Get the daily cost for a specific date.
     pub fn get_daily_cost(&self, date: NaiveDate) -> Result<f64> {
         let storage = self.lock_storage()?;
@@ -178,9 +236,23 @@ impl CostTracker {
     }
 }
 
-fn resolve_storage_path(workspace_dir: &Path) -> Result<PathBuf> {
-    let storage_path = workspace_dir.join("state").join("costs.jsonl");
-    let legacy_path = workspace_dir.join(".redclaw").join("costs.db");
+fn resolve_storage_path(config: &CostConfig, workspace_dir: &Path) -> Result<PathBuf> {
+    if let Some(raw) = config
+        .log_path
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let p = PathBuf::from(raw);
+        return Ok(if p.is_absolute() {
+            p
+        } else {
+            workspace_dir.join(p)
+        });
+    }
+
+    let storage_path = default_storage_path(workspace_dir);
+    let legacy_path = legacy_storage_path(workspace_dir);
 
     if !storage_path.exists() && legacy_path.exists() {
         if let Some(parent) = storage_path.parent() {
@@ -205,6 +277,47 @@ fn resolve_storage_path(workspace_dir: &Path) -> Result<PathBuf> {
     }
 
     Ok(storage_path)
+}
+
+fn default_storage_path(workspace_dir: &Path) -> PathBuf {
+    // Default layout: ~/.redclaw/workspace => write logs to ~/.redclaw/cost.jsonl
+    if workspace_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s == "workspace")
+    {
+        if let Some(parent) = workspace_dir.parent() {
+            return parent.join("cost.jsonl");
+        }
+    }
+
+    // Fallback: keep cost logs inside the workspace.
+    workspace_dir.join("state").join("costs.jsonl")
+}
+
+fn legacy_storage_path(workspace_dir: &Path) -> PathBuf {
+    // Try the historical ~/.redclaw/costs.db when workspace is default.
+    if workspace_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s == "workspace")
+    {
+        if let Some(parent) = workspace_dir.parent() {
+            let candidate = parent.join("costs.db");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    // Legacy path used by earlier builds.
+    let legacy_local = workspace_dir.join(".redclaw").join("costs.db");
+    if legacy_local.exists() {
+        return legacy_local;
+    }
+
+    // Last resort: keep the legacy location stable even if it doesn't exist.
+    legacy_local
 }
 
 fn build_session_model_stats(session_costs: &[CostRecord]) -> HashMap<String, ModelStats> {
@@ -472,7 +585,7 @@ mod tests {
     #[test]
     fn summary_by_model_is_session_scoped() {
         let tmp = TempDir::new().unwrap();
-        let storage_path = resolve_storage_path(tmp.path()).unwrap();
+        let storage_path = resolve_storage_path(&enabled_config(), tmp.path()).unwrap();
         if let Some(parent) = storage_path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
@@ -503,7 +616,7 @@ mod tests {
     #[test]
     fn malformed_lines_are_ignored_while_loading() {
         let tmp = TempDir::new().unwrap();
-        let storage_path = resolve_storage_path(tmp.path()).unwrap();
+        let storage_path = resolve_storage_path(&enabled_config(), tmp.path()).unwrap();
         if let Some(parent) = storage_path.parent() {
             fs::create_dir_all(parent).unwrap();
         }

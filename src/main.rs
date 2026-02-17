@@ -45,6 +45,7 @@ mod rag {
     pub use redclaw::rag::*;
 }
 mod config;
+mod cost;
 mod cron;
 mod daemon;
 mod doctor;
@@ -60,6 +61,7 @@ mod migration;
 mod observability;
 mod onboard;
 mod peripherals;
+mod policy;
 mod providers;
 mod runtime;
 mod security;
@@ -179,7 +181,7 @@ enum Commands {
         service_command: ServiceCommands,
     },
 
-    /// Run diagnostics for daemon/scheduler/channel freshness
+    /// Comprehensive system health check (config, providers, channels, memory, security, cost, policy)
     Doctor,
 
     /// Show system status (full details)
@@ -543,7 +545,15 @@ async fn main() -> Result<()> {
 
         Commands::Service { service_command } => service::handle_command(&service_command, &config),
 
-        Commands::Doctor => doctor::run(&config),
+        Commands::Doctor => {
+            let report = doctor::run_diagnostics(&config);
+            println!("{report}");
+            if report.overall == doctor::HealthStatus::Healthy {
+                Ok(())
+            } else {
+                std::process::exit(1);
+            }
+        }
 
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => channels::start_channels(config).await,

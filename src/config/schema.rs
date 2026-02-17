@@ -1,5 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use crate::errors::*;
+use crate::policy::PolicyConfig;
 use crate::security::AutonomyLevel;
 use anyhow::{Context, Result};
 use directories::UserDirs;
@@ -29,6 +30,10 @@ pub struct Config {
 
     #[serde(default)]
     pub autonomy: AutonomyConfig,
+
+    /// Policy-as-code tool permissions and access control.
+    #[serde(default)]
+    pub policy: PolicyConfig,
 
     #[serde(default)]
     pub runtime: RuntimeConfig,
@@ -260,15 +265,39 @@ impl Default for IdentityConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostConfig {
-    /// Enable cost tracking (default: false)
-    #[serde(default)]
+    /// Enable cost tracking (default: true)
+    #[serde(default = "default_cost_enabled")]
     pub enabled: bool,
 
-    /// Daily spending limit in USD (default: 10.00)
+    /// Daily budget limit in USD (0 = unlimited)
+    #[serde(default)]
+    pub daily_budget_usd: f64,
+
+    /// Session budget limit in USD (0 = unlimited)
+    #[serde(default)]
+    pub session_budget_usd: f64,
+
+    /// Per-request budget limit in USD (0 = unlimited)
+    #[serde(default)]
+    pub per_request_budget_usd: f64,
+
+    /// Auto-pause when budget exceeded
+    #[serde(default = "default_cost_auto_pause")]
+    pub auto_pause: bool,
+
+    /// Path for cost log file (relative paths are workspace-relative)
+    ///
+    /// When unset, defaults to `~/.redclaw/cost.jsonl` for the default
+    /// workspace layout (`~/.redclaw/workspace`), otherwise uses
+    /// `<workspace>/state/costs.jsonl`.
+    #[serde(default)]
+    pub log_path: Option<String>,
+
+    /// Daily spending limit in USD (legacy; 0 = unlimited)
     #[serde(default = "default_daily_limit")]
     pub daily_limit_usd: f64,
 
-    /// Monthly spending limit in USD (default: 100.00)
+    /// Monthly spending limit in USD (legacy; 0 = unlimited)
     #[serde(default = "default_monthly_limit")]
     pub monthly_limit_usd: f64,
 
@@ -297,26 +326,49 @@ pub struct ModelPricing {
 }
 
 fn default_daily_limit() -> f64 {
-    10.0
+    0.0
 }
 
 fn default_monthly_limit() -> f64 {
-    100.0
+    0.0
 }
 
 fn default_warn_percent() -> u8 {
     80
 }
 
+fn default_cost_enabled() -> bool {
+    true
+}
+
+fn default_cost_auto_pause() -> bool {
+    true
+}
+
 impl Default for CostConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_cost_enabled(),
+            daily_budget_usd: 0.0,
+            session_budget_usd: 0.0,
+            per_request_budget_usd: 0.0,
+            auto_pause: default_cost_auto_pause(),
+            log_path: None,
             daily_limit_usd: default_daily_limit(),
             monthly_limit_usd: default_monthly_limit(),
             warn_at_percent: default_warn_percent(),
             allow_override: false,
             prices: get_default_pricing(),
+        }
+    }
+}
+
+impl CostConfig {
+    pub fn effective_daily_limit_usd(&self) -> f64 {
+        if self.daily_budget_usd > 0.0 {
+            self.daily_budget_usd
+        } else {
+            self.daily_limit_usd
         }
     }
 }
@@ -1561,6 +1613,7 @@ impl Default for Config {
             default_temperature: 0.7,
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
+            policy: PolicyConfig::default(),
             runtime: RuntimeConfig::default(),
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
@@ -1912,6 +1965,7 @@ mod tests {
                 require_approval_for_medium_risk: false,
                 block_high_risk_commands: true,
             },
+            policy: PolicyConfig::default(),
             runtime: RuntimeConfig {
                 kind: "docker".into(),
                 ..RuntimeConfig::default()
@@ -2041,6 +2095,7 @@ tool_dispatcher = "xml"
             default_temperature: 0.9,
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
+            policy: PolicyConfig::default(),
             runtime: RuntimeConfig::default(),
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),

@@ -63,6 +63,7 @@ impl TokenUsage {
 /// Time period for cost aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UsagePeriod {
+    Request,
     Session,
     Day,
     Month,

@@ -26,11 +26,13 @@ pub use whatsapp::WhatsAppChannel;
 
 use crate::agent::loop_::{build_tool_instructions, run_tool_call_loop};
 use crate::config::Config;
+use crate::cost::CostTracker;
 #[allow(clippy::wildcard_imports)]
 use crate::errors::*;
 use crate::identity;
 use crate::memory::{self, Memory};
 use crate::observability::{self, Observer};
+use crate::policy::{PolicyAction, PolicyEngine};
 use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
 use crate::security::SecurityPolicy;
@@ -60,6 +62,8 @@ struct ChannelRuntimeContext {
     provider: Arc<dyn Provider>,
     memory: Arc<dyn Memory>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
+    policy_engine: Option<Arc<PolicyEngine>>,
+    cost_tracker: Option<Arc<CostTracker>>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
     model: Arc<String>,
@@ -196,6 +200,9 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
             "channel-runtime",
             ctx.model.as_str(),
             ctx.temperature,
+            ctx.policy_engine.as_deref(),
+            Some(msg.channel.as_str()),
+            ctx.cost_tracker.clone(),
             true, // silent — channels don't write to stdout
         ),
     )
@@ -818,6 +825,23 @@ pub async fn start_channels(config: Config) -> Result<()> {
         &config.autonomy,
         &config.workspace_dir,
     ));
+    let policy_engine = if config.policy.tools.is_empty()
+        && config.policy.channels.is_empty()
+        && config.policy.default_action == PolicyAction::Allow
+    {
+        None
+    } else {
+        Some(Arc::new(PolicyEngine::new(config.policy.clone())))
+    };
+
+    let cost_tracker = if config.cost.enabled {
+        Some(Arc::new(CostTracker::new(
+            config.cost.clone(),
+            &config.workspace_dir,
+        )?))
+    } else {
+        None
+    };
     let model = config
         .default_model
         .clone()
@@ -1089,6 +1113,8 @@ pub async fn start_channels(config: Config) -> Result<()> {
         provider: Arc::clone(&provider),
         memory: Arc::clone(&mem),
         tools_registry: Arc::clone(&tools_registry),
+        policy_engine,
+        cost_tracker,
         observer,
         system_prompt: Arc::new(system_prompt),
         model: Arc::new(model.clone()),
@@ -1275,6 +1301,8 @@ mod tests {
             provider: Arc::new(ToolCallingProvider),
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
+            policy_engine: None,
+            cost_tracker: None,
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
@@ -1365,6 +1393,8 @@ mod tests {
             }),
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
+            policy_engine: None,
+            cost_tracker: None,
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
