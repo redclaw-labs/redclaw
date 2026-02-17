@@ -49,7 +49,7 @@ Local machine quick benchmark (macOS arm64, Feb 2026) normalized for 0.8GHz edge
 > Notes: RedClaw results measured with `/usr/bin/time -l` on release builds. OpenClaw requires Node.js runtime (~390MB overhead). PicoClaw and RedClaw are static binaries.
 
 <p align="center">
-  <img src="zero-claw.jpeg" alt="RedClaw vs OpenClaw Comparison" width="800" />
+  <img src="redclaw.jpeg" alt="RedClaw vs OpenClaw Comparison" width="800" />
 </p>
 
 Reproduce RedClaw numbers locally:
