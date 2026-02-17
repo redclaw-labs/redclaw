@@ -275,46 +275,69 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let mut tunnel_url: Option<String> = None;
 
     if let Some(ref tun) = tunnel {
-        println!("🔗 Starting {} tunnel...", tun.name());
+        eprintln!(
+            "{} Starting {} tunnel...",
+            redclaw::cli::Theme::primary().apply_to("▸"),
+            tun.name()
+        );
         match tun.start(host, actual_port).await {
             Ok(url) => {
-                println!("🌐 Tunnel active: {url}");
+                eprintln!(
+                    "{} Tunnel active: {url}",
+                    redclaw::cli::Theme::success().apply_to("✓")
+                );
                 tunnel_url = Some(url);
             }
             Err(e) => {
-                println!("⚠️  Tunnel failed to start: {e}");
-                println!("   Falling back to local-only mode.");
+                eprintln!(
+                    "{} Tunnel failed to start: {e}",
+                    redclaw::cli::Theme::warning().apply_to("!")
+                );
+                eprintln!("   Falling back to local-only mode.");
             }
         }
     }
 
-    println!("🦀 RedClaw Gateway listening on http://{display_addr}");
+    let detail = format!("http://{display_addr}");
+    redclaw::cli::print_service_ready("Gateway", &detail);
     if let Some(ref url) = tunnel_url {
-        println!("  🌐 Public URL: {url}");
+        eprintln!("  Public URL: {url}");
     }
-    println!("  POST /pair      — pair a new client (X-Pairing-Code header)");
-    println!("  POST /webhook   — {{\"message\": \"your prompt\"}}");
+    eprintln!("  POST /pair      — pair a new client (X-Pairing-Code header)");
+    eprintln!("  POST /webhook   — {{\"message\": \"your prompt\"}}");
     if whatsapp_channel.is_some() {
-        println!("  GET  /whatsapp  — Meta webhook verification");
-        println!("  POST /whatsapp  — WhatsApp message webhook");
+        eprintln!("  GET  /whatsapp  — Meta webhook verification");
+        eprintln!("  POST /whatsapp  — WhatsApp message webhook");
     }
-    println!("  GET  /health    — health check");
+    eprintln!("  GET  /health    — health check");
     if let Some(code) = pairing.pairing_code() {
-        println!();
-        println!("  🔐 PAIRING REQUIRED — use this one-time code:");
-        println!("     ┌──────────────┐");
-        println!("     │  {code}  │");
-        println!("     └──────────────┘");
-        println!("     Send: POST /pair with header X-Pairing-Code: {code}");
+        eprintln!();
+        eprintln!(
+            "  {} PAIRING REQUIRED — use this one-time code:",
+            redclaw::cli::Theme::primary().apply_to("▸")
+        );
+        eprintln!("     ┌──────────────┐");
+        eprintln!("     │  {code}  │");
+        eprintln!("     └──────────────┘");
+        eprintln!("     Send: POST /pair with header X-Pairing-Code: {code}");
     } else if pairing.require_pairing() {
-        println!("  🔒 Pairing: ACTIVE (bearer token required)");
+        eprintln!(
+            "  {} Pairing: ACTIVE (bearer token required)",
+            redclaw::cli::Theme::success().apply_to("✓")
+        );
     } else {
-        println!("  ⚠️  Pairing: DISABLED (all requests accepted)");
+        eprintln!(
+            "  {} Pairing: DISABLED (all requests accepted)",
+            redclaw::cli::Theme::warning().apply_to("!")
+        );
     }
     if webhook_secret.is_some() {
-        println!("  🔒 Webhook secret: ENABLED");
+        eprintln!(
+            "  {} Webhook secret: ENABLED",
+            redclaw::cli::Theme::success().apply_to("✓")
+        );
     }
-    println!("  Press Ctrl+C to stop.\n");
+    eprintln!("  Press Ctrl+C to stop.\n");
 
     crate::health::mark_component_ok("gateway");
 
@@ -386,7 +409,7 @@ async fn handle_pair(State(state): State<AppState>, headers: HeaderMap) -> impl 
 
     match state.pairing.try_pair(code) {
         Ok(Some(token)) => {
-            tracing::info!("🔐 New client paired successfully");
+            tracing::info!("New client paired successfully");
             let body = serde_json::json!({
                 "paired": true,
                 "token": token,
@@ -395,13 +418,13 @@ async fn handle_pair(State(state): State<AppState>, headers: HeaderMap) -> impl 
             (StatusCode::OK, Json(body))
         }
         Ok(None) => {
-            tracing::warn!("🔐 Pairing attempt with invalid code");
+            tracing::warn!("Pairing attempt with invalid code");
             let err = serde_json::json!({"error": "Invalid pairing code"});
             (StatusCode::FORBIDDEN, Json(err))
         }
         Err(lockout_secs) => {
             tracing::warn!(
-                "🔐 Pairing locked out — too many failed attempts ({lockout_secs}s remaining)"
+                "Pairing locked out — too many failed attempts ({lockout_secs}s remaining)"
             );
             let err = serde_json::json!({
                 "error": format!("Too many failed attempts. Try again in {lockout_secs}s."),

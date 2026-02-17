@@ -17,6 +17,9 @@ pub use traits::{
 use compatible::{AuthStyle, OpenAiCompatibleProvider};
 use reliable::ReliableProvider;
 
+#[allow(clippy::wildcard_imports)]
+use crate::errors::*;
+
 const MAX_API_ERROR_CHARS: usize = 200;
 
 fn is_secret_char(c: char) -> bool {
@@ -166,16 +169,23 @@ fn parse_custom_provider_url(
     let base_url = raw_url.trim();
 
     if base_url.is_empty() {
-        anyhow::bail!("{provider_label} requires a URL. Format: {format_hint}");
+        crate::rc_bail!(
+            CONFIG_INVALID_VALUE,
+            "{provider_label} requires a URL. Format: {format_hint}"
+        );
     }
 
-    let parsed = reqwest::Url::parse(base_url).map_err(|_| {
-        anyhow::anyhow!("{provider_label} requires a valid URL. Format: {format_hint}")
+    let parsed = reqwest::Url::parse(base_url).map_err(|e| {
+        crate::rc_error!(
+            CONFIG_INVALID_VALUE,
+            "{provider_label} requires a valid URL. Format: {format_hint}. Error: {e}"
+        )
     })?;
 
     match parsed.scheme() {
         "http" | "https" => Ok(base_url.to_string()),
-        _ => anyhow::bail!(
+        _ => crate::rc_bail!(
+            CONFIG_INVALID_VALUE,
             "{provider_label} requires an http:// or https:// URL. Format: {format_hint}"
         ),
     }
@@ -310,7 +320,8 @@ pub fn create_provider(name: &str, api_key: Option<&str>) -> anyhow::Result<Box<
             )))
         }
 
-        _ => anyhow::bail!(
+        _ => crate::rc_bail!(
+            PROVIDER_NOT_FOUND,
             "Unknown provider: {name}. Check README for supported providers or run `redclaw onboard --interactive` to reconfigure.\n\
              Tip: Use \"custom:https://your-api.com\" for OpenAI-compatible endpoints.\n\
              Tip: Use \"anthropic-custom:https://your-api.com\" for Anthropic-compatible endpoints."

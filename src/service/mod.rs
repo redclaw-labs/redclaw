@@ -31,12 +31,18 @@ fn start(config: &Config) -> Result<()> {
         let plist = macos_service_file()?;
         run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
         run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
-        println!("✅ Service started");
+        eprintln!(
+            "{} Service started",
+            redclaw::cli::Theme::success().apply_to("✓")
+        );
         Ok(())
     } else if cfg!(target_os = "linux") {
         run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
         run_checked(Command::new("systemctl").args(["--user", "start", "redclaw.service"]))?;
-        println!("✅ Service started");
+        eprintln!(
+            "{} Service started",
+            redclaw::cli::Theme::success().apply_to("✓")
+        );
         Ok(())
     } else {
         let _ = config;
@@ -54,11 +60,17 @@ fn stop(config: &Config) -> Result<()> {
                 .arg("-w")
                 .arg(&plist),
         );
-        println!("✅ Service stopped");
+        eprintln!(
+            "{} Service stopped",
+            redclaw::cli::Theme::success().apply_to("✓")
+        );
         Ok(())
     } else if cfg!(target_os = "linux") {
         let _ = run_checked(Command::new("systemctl").args(["--user", "stop", "redclaw.service"]));
-        println!("✅ Service stopped");
+        eprintln!(
+            "{} Service stopped",
+            redclaw::cli::Theme::success().apply_to("✓")
+        );
         Ok(())
     } else {
         let _ = config;
@@ -70,15 +82,18 @@ fn status(config: &Config) -> Result<()> {
     if cfg!(target_os = "macos") {
         let out = run_capture(Command::new("launchctl").arg("list"))?;
         let running = out.lines().any(|line| line.contains(SERVICE_LABEL));
-        println!(
+        eprintln!(
             "Service: {}",
             if running {
-                "✅ running/loaded"
+                format!(
+                    "{} running/loaded",
+                    redclaw::cli::Theme::success().apply_to("✓")
+                )
             } else {
-                "❌ not loaded"
+                format!("{} not loaded", redclaw::cli::Theme::error().apply_to("✗"))
             }
         );
-        println!("Unit: {}", macos_service_file()?.display());
+        eprintln!("Unit: {}", macos_service_file()?.display());
         return Ok(());
     }
 
@@ -86,8 +101,8 @@ fn status(config: &Config) -> Result<()> {
         let out =
             run_capture(Command::new("systemctl").args(["--user", "is-active", "redclaw.service"]))
                 .unwrap_or_else(|_| "unknown".into());
-        println!("Service state: {}", out.trim());
-        println!("Unit: {}", linux_service_file(config)?.display());
+        eprintln!("Service state: {}", out.trim());
+        eprintln!("Unit: {}", linux_service_file(config)?.display());
         return Ok(());
     }
 
@@ -103,7 +118,11 @@ fn uninstall(config: &Config) -> Result<()> {
             fs::remove_file(&file)
                 .with_context(|| format!("Failed to remove {}", file.display()))?;
         }
-        println!("✅ Service uninstalled ({})", file.display());
+        eprintln!(
+            "{} Service uninstalled ({})",
+            redclaw::cli::Theme::success().apply_to("✓"),
+            file.display()
+        );
         return Ok(());
     }
 
@@ -114,7 +133,11 @@ fn uninstall(config: &Config) -> Result<()> {
                 .with_context(|| format!("Failed to remove {}", file.display()))?;
         }
         let _ = run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]));
-        println!("✅ Service uninstalled ({})", file.display());
+        eprintln!(
+            "{} Service uninstalled ({})",
+            redclaw::cli::Theme::success().apply_to("✓"),
+            file.display()
+        );
         return Ok(());
     }
 
@@ -168,8 +191,12 @@ fn install_macos(config: &Config) -> Result<()> {
     );
 
     fs::write(&file, plist)?;
-    println!("✅ Installed launchd service: {}", file.display());
-    println!("   Start with: redclaw service start");
+    eprintln!(
+        "{} Installed launchd service: {}",
+        redclaw::cli::Theme::success().apply_to("✓"),
+        file.display()
+    );
+    eprintln!("   Start with: redclaw service start");
     Ok(())
 }
 
@@ -188,8 +215,12 @@ fn install_linux(config: &Config) -> Result<()> {
     fs::write(&file, unit)?;
     let _ = run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]));
     let _ = run_checked(Command::new("systemctl").args(["--user", "enable", "redclaw.service"]));
-    println!("✅ Installed systemd user service: {}", file.display());
-    println!("   Start with: redclaw service start");
+    eprintln!(
+        "{} Installed systemd user service: {}",
+        redclaw::cli::Theme::success().apply_to("✓"),
+        file.display()
+    );
+    eprintln!("   Start with: redclaw service start");
     Ok(())
 }
 

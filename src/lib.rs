@@ -35,16 +35,20 @@
     dead_code
 )]
 
+extern crate self as redclaw;
+
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod channels;
+pub mod cli;
 pub mod config;
 pub mod cost;
 pub mod cron;
 pub mod daemon;
 pub mod doctor;
+pub mod errors;
 pub mod gateway;
 pub mod hardware;
 pub mod health;

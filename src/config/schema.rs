@@ -1,3 +1,5 @@
+#[allow(clippy::wildcard_imports)]
+use crate::errors::*;
 use crate::security::AutonomyLevel;
 use anyhow::{Context, Result};
 use directories::UserDirs;
@@ -1597,10 +1599,27 @@ impl Config {
         }
 
         if config_path.exists() {
-            let contents =
-                fs::read_to_string(&config_path).context("Failed to read config file")?;
-            let mut config: Config =
-                toml::from_str(&contents).context("Failed to parse config file")?;
+            let contents = match fs::read_to_string(&config_path) {
+                Ok(contents) => contents,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    crate::rc_bail!(
+                        CONFIG_NOT_FOUND,
+                        "Configuration file {} not found",
+                        config_path.display()
+                    );
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("Failed to read config file"));
+                }
+            };
+
+            let mut config: Config = toml::from_str(&contents).with_context(|| {
+                format!(
+                    "{} — Failed to parse config file: {}",
+                    CONFIG_PARSE_ERROR.diagnostic(),
+                    config_path.display()
+                )
+            })?;
             // Set computed paths that are skipped during serialization
             config.config_path = config_path.clone();
             config.workspace_dir = redclaw_dir.join("workspace");
@@ -1716,12 +1735,13 @@ impl Config {
             .config_path
             .parent()
             .context("Config path must have a parent directory")?;
-        fs::create_dir_all(parent_dir).with_context(|| {
-            format!(
-                "Failed to create config directory: {}",
+        if let Err(e) = fs::create_dir_all(parent_dir) {
+            crate::rc_bail!(
+                CONFIG_DIR_CREATE_FAILED,
+                "Failed to create config directory {}: {e}",
                 parent_dir.display()
-            )
-        })?;
+            );
+        }
 
         let file_name = self
             .config_path

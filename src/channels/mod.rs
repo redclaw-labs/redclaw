@@ -26,6 +26,8 @@ pub use whatsapp::WhatsAppChannel;
 
 use crate::agent::loop_::{build_tool_instructions, run_tool_call_loop};
 use crate::config::Config;
+#[allow(clippy::wildcard_imports)]
+use crate::errors::*;
 use crate::identity;
 use crate::memory::{self, Memory};
 use crate::observability::{self, Observer};
@@ -207,20 +209,26 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
 
     match llm_result {
         Ok(Ok(response)) => {
-            println!(
-                "  🤖 Reply ({}ms): {}",
+            eprintln!(
+                "  {} Reply ({}ms): {}",
+                redclaw::cli::Theme::primary().apply_to("▸"),
                 started_at.elapsed().as_millis(),
                 truncate_with_ellipsis(&response, 80)
             );
             if let Some(channel) = target_channel.as_ref() {
                 if let Err(e) = channel.send(&response, &msg.sender).await {
-                    eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
+                    eprintln!(
+                        "  {} Failed to reply on {}: {e}",
+                        redclaw::cli::Theme::error().apply_to("✗"),
+                        channel.name()
+                    );
                 }
             }
         }
         Ok(Err(e)) => {
             eprintln!(
-                "  ❌ LLM error after {}ms: {e}",
+                "  {} LLM error after {}ms: {e}",
+                redclaw::cli::Theme::error().apply_to("✗"),
                 started_at.elapsed().as_millis()
             );
             if let Some(channel) = target_channel.as_ref() {
@@ -233,7 +241,8 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
                 CHANNEL_MESSAGE_TIMEOUT_SECS
             );
             eprintln!(
-                "  ❌ {} (elapsed: {}ms)",
+                "  {} {} (elapsed: {}ms)",
+                redclaw::cli::Theme::error().apply_to("✗"),
                 timeout_msg,
                 started_at.elapsed().as_millis()
             );
@@ -544,8 +553,11 @@ pub fn handle_command(command: crate::ChannelCommands, config: &Config) -> Resul
             anyhow::bail!("Doctor must be handled in main.rs (requires async runtime)")
         }
         crate::ChannelCommands::List => {
-            println!("Channels:");
-            println!("  ✅ CLI (always available)");
+            eprintln!("Channels:");
+            eprintln!(
+                "  {} CLI (always available)",
+                redclaw::cli::Theme::success().apply_to("✓")
+            );
             for (name, configured) in [
                 ("Telegram", config.channels_config.telegram.is_some()),
                 ("Discord", config.channels_config.discord.is_some()),
@@ -559,18 +571,26 @@ pub fn handle_command(command: crate::ChannelCommands, config: &Config) -> Resul
                 ("Lark", config.channels_config.lark.is_some()),
                 ("DingTalk", config.channels_config.dingtalk.is_some()),
             ] {
-                println!("  {} {name}", if configured { "✅" } else { "❌" });
+                eprintln!(
+                    "  {} {name}",
+                    if configured {
+                        redclaw::cli::Theme::success().apply_to("✓")
+                    } else {
+                        redclaw::cli::Theme::error().apply_to("✗")
+                    }
+                );
             }
-            println!("\nTo start channels: redclaw channel start");
-            println!("To check health:    redclaw channel doctor");
-            println!("To configure:      redclaw onboard");
+            eprintln!("\nTo start channels: redclaw channel start");
+            eprintln!("To check health:    redclaw channel doctor");
+            eprintln!("To configure:      redclaw onboard");
             Ok(())
         }
         crate::ChannelCommands::Add {
             channel_type,
             config: _,
         } => {
-            anyhow::bail!(
+            crate::rc_bail!(
+                CHANNEL_NOT_FOUND,
                 "Channel type '{channel_type}' — use `redclaw onboard` to configure channels"
             );
         }
@@ -712,12 +732,19 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     }
 
     if channels.is_empty() {
-        println!("No real-time channels configured. Run `redclaw onboard` first.");
+        eprintln!(
+            "{}",
+            redclaw::cli::Theme::warning()
+                .apply_to("! No real-time channels configured. Run `redclaw onboard` first.")
+        );
         return Ok(());
     }
 
-    println!("🩺 RedClaw Channel Doctor");
-    println!();
+    eprintln!(
+        "{}",
+        redclaw::cli::Theme::header().apply_to("RedClaw Channel Doctor")
+    );
+    eprintln!();
 
     let mut healthy = 0_u32;
     let mut unhealthy = 0_u32;
@@ -730,25 +757,37 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
         match state {
             ChannelHealthState::Healthy => {
                 healthy += 1;
-                println!("  ✅ {name:<9} healthy");
+                eprintln!(
+                    "  {} {name:<9} healthy",
+                    redclaw::cli::Theme::success().apply_to("✓")
+                );
             }
             ChannelHealthState::Unhealthy => {
                 unhealthy += 1;
-                println!("  ❌ {name:<9} unhealthy (auth/config/network)");
+                eprintln!(
+                    "  {} {name:<9} unhealthy (auth/config/network)",
+                    redclaw::cli::Theme::error().apply_to("✗")
+                );
             }
             ChannelHealthState::Timeout => {
                 timeout += 1;
-                println!("  ⏱️  {name:<9} timed out (>10s)");
+                eprintln!(
+                    "  {} {name:<9} timed out (>10s)",
+                    redclaw::cli::Theme::warning().apply_to("!")
+                );
             }
         }
     }
 
     if config.channels_config.webhook.is_some() {
-        println!("  ℹ️  Webhook   check via `redclaw gateway` then GET /health");
+        eprintln!(
+            "  {} Webhook   check via `redclaw gateway` then GET /health",
+            redclaw::cli::Theme::primary().apply_to("▸")
+        );
     }
 
-    println!();
-    println!("Summary: {healthy} healthy, {unhealthy} unhealthy, {timeout} timed out");
+    eprintln!();
+    eprintln!("Summary: {healthy} healthy, {unhealthy} unhealthy, {timeout} timed out");
     Ok(())
 }
 
@@ -979,28 +1018,35 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     if channels.is_empty() {
-        println!("No channels configured. Run `redclaw onboard` to set up channels.");
+        eprintln!(
+            "{}",
+            redclaw::cli::Theme::warning()
+                .apply_to("! No channels configured. Run `redclaw onboard` to set up channels.")
+        );
         return Ok(());
     }
 
-    println!("🦀 RedClaw Channel Server");
-    println!("  🤖 Model:    {model}");
-    println!(
-        "  🧠 Memory:   {} (auto-save: {})",
+    redclaw::cli::print_service_start("Channels");
+    eprintln!("  Model:    {model}");
+    eprintln!(
+        "  Memory:   {} (auto-save: {})",
         config.memory.backend,
         if config.memory.auto_save { "on" } else { "off" }
     );
-    println!(
-        "  📡 Channels: {}",
+    eprintln!(
+        "  Channels: {}",
         channels
             .iter()
             .map(|c| c.name())
             .collect::<Vec<_>>()
             .join(", ")
     );
-    println!();
-    println!("  Listening for messages... (Ctrl+C to stop)");
-    println!();
+    eprintln!();
+    eprintln!(
+        "  {} Listening for messages... (Ctrl+C to stop)",
+        redclaw::cli::Theme::primary().apply_to("▸")
+    );
+    eprintln!();
 
     crate::health::mark_component_ok("channels");
 

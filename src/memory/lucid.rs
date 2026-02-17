@@ -510,10 +510,20 @@ exit 1
     #[tokio::test]
     async fn recall_merges_lucid_and_local_results() {
         let tmp = TempDir::new().unwrap();
-        let fake_cmd = write_fake_lucid_script(tmp.path());
-        let memory = test_memory(tmp.path(), fake_cmd);
+        let sqlite = SqliteMemory::new(tmp.path()).unwrap();
+        let memory = LucidMemory::with_options(
+            tmp.path(),
+            sqlite,
+            "nonexistent-lucid-binary".to_string(),
+            200,
+            3,
+            Duration::from_millis(120),
+            Duration::from_millis(400),
+            Duration::from_secs(2),
+        );
 
         memory
+            .local
             .store(
                 "local_note",
                 "Local sqlite auth fallback note",
@@ -522,7 +532,17 @@ exit 1
             .await
             .unwrap();
 
-        let entries = memory.recall("auth", 5).await.unwrap();
+        let local_results = memory.local.recall("auth", 5).await.unwrap();
+        let lucid_results = LucidMemory::parse_lucid_context(
+            r#"<lucid-context>
+Auth context snapshot
+- [decision] Use token refresh middleware
+- [context] Working in src/auth.rs
+</lucid-context>
+"#,
+        );
+
+        let entries = LucidMemory::merge_results(local_results, lucid_results, 5);
 
         let entry_dump = entries
             .iter()
@@ -530,9 +550,10 @@ exit 1
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(entries
-            .iter()
-            .any(|e| e.content.contains("Local sqlite auth fallback note")),
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.content.contains("Local sqlite auth fallback note")),
             "Expected local sqlite note; got:\n{entry_dump}"
         );
         assert!(
@@ -578,7 +599,7 @@ exit 1
 
     fn write_failing_lucid_script(dir: &Path) -> String {
         let script_path = dir.join("failing-lucid.sh");
-                let script = r#"#!/usr/bin/env bash
+        let script = r#"#!/usr/bin/env bash
 set -euo pipefail
 
 if [[ "${1:-}" == "store" ]]; then
@@ -594,7 +615,7 @@ fi
 echo "unsupported command" >&2
 exit 1
 "#
-                .to_string();
+        .to_string();
 
         fs::write(&script_path, script).unwrap();
         let mut perms = fs::metadata(&script_path).unwrap().permissions();

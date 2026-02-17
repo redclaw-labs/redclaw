@@ -857,8 +857,12 @@ pub async fn run(
                 .await;
         }
     } else {
-        println!("🦀 RedClaw Interactive Mode");
-        println!("Type /quit to exit.\n");
+        redclaw::cli::print_banner();
+        redclaw::cli::print_service_start("Interactive Mode");
+        eprintln!(
+            "{}",
+            redclaw::cli::Theme::dim().apply_to("Type /quit to exit.\n")
+        );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
         let cli = crate::channels::CliChannel::new();

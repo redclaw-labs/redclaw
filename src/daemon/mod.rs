@@ -84,10 +84,9 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         ));
     }
 
-    println!("🧠 RedClaw daemon started");
-    println!("   Gateway:  http://{host}:{port}");
-    println!("   Components: gateway, channels, heartbeat, scheduler");
-    println!("   Ctrl+C to stop");
+    redclaw::cli::print_service_ready("Daemon", &format!("gateway http://{host}:{port}"));
+    eprintln!("   Components: gateway, channels, heartbeat, scheduler");
+    eprintln!("   Ctrl+C to stop");
 
     tokio::signal::ctrl_c().await?;
     crate::health::mark_component_error("daemon", "shutdown requested");

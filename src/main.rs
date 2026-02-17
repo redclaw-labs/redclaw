@@ -34,7 +34,9 @@
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
+#[allow(unused_imports)]
+use redclaw::cli::{print_banner, print_service_ready, print_service_start, print_shutdown};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 mod agent;
@@ -46,6 +48,7 @@ mod config;
 mod cron;
 mod daemon;
 mod doctor;
+mod errors;
 mod gateway;
 mod hardware;
 mod health;
@@ -77,7 +80,10 @@ pub use redclaw::{HardwareCommands, PeripheralCommands};
 #[command(name = "redclaw")]
 #[command(author = "redf0x1")]
 #[command(version = "0.1.0")]
-#[command(about = "The fastest, smallest AI assistant.", long_about = None)]
+#[command(about = "Battle-hardened AI agent runtime")]
+#[command(
+    long_about = "RedClaw — Battle-hardened AI agent runtime. Built in Rust. OpenClaw-compatible."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -357,6 +363,14 @@ async fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
+    struct ShutdownGuard;
+    impl Drop for ShutdownGuard {
+        fn drop(&mut self) {
+            print_shutdown();
+        }
+    }
+    let _shutdown_guard = ShutdownGuard;
+
     // Onboard runs quick setup by default, or the interactive wizard with --interactive
     if let Commands::Onboard {
         interactive,
@@ -406,91 +420,107 @@ async fn main() -> Result<()> {
         }
 
         Commands::Gateway { port, host } => {
+            print_banner();
+            print_service_start("Gateway");
             if port == 0 {
-                info!("🚀 Starting RedClaw Gateway on {host} (random port)");
+                tracing::info!("Starting Gateway on {host} (random port)");
             } else {
-                info!("🚀 Starting RedClaw Gateway on {host}:{port}");
+                tracing::info!("Starting Gateway on {host}:{port}");
             }
             gateway::run_gateway(&host, port, config).await
         }
 
         Commands::Daemon { port, host } => {
+            print_banner();
+            print_service_start("Daemon");
             if port == 0 {
-                info!("🧠 Starting RedClaw Daemon on {host} (random port)");
+                tracing::info!("Starting Daemon on {host} (random port)");
             } else {
-                info!("🧠 Starting RedClaw Daemon on {host}:{port}");
+                tracing::info!("Starting Daemon on {host}:{port}");
             }
             daemon::run(config, host, port).await
         }
 
         Commands::Status => {
-            println!("🦀 RedClaw Status");
-            println!();
-            println!("Version:     {}", env!("CARGO_PKG_VERSION"));
-            println!("Workspace:   {}", config.workspace_dir.display());
-            println!("Config:      {}", config.config_path.display());
-            println!();
-            println!(
-                "🤖 Provider:      {}",
+            eprintln!(
+                "{}",
+                redclaw::cli::Theme::header().apply_to("RedClaw Status")
+            );
+            eprintln!();
+            eprintln!("Version:     {}", env!("CARGO_PKG_VERSION"));
+            eprintln!("Workspace:   {}", config.workspace_dir.display());
+            eprintln!("Config:      {}", config.config_path.display());
+            eprintln!();
+            eprintln!(
+                "Provider:    {}",
                 config.default_provider.as_deref().unwrap_or("openrouter")
             );
-            println!(
-                "   Model:         {}",
+            eprintln!(
+                "Model:       {}",
                 config.default_model.as_deref().unwrap_or("(default)")
             );
-            println!("📊 Observability:  {}", config.observability.backend);
-            println!("🛡️  Autonomy:      {:?}", config.autonomy.level);
-            println!("⚙️  Runtime:       {}", config.runtime.kind);
-            println!(
-                "💓 Heartbeat:      {}",
+            eprintln!("Observability: {}", config.observability.backend);
+            eprintln!("Autonomy:      {:?}", config.autonomy.level);
+            eprintln!("Runtime:       {}", config.runtime.kind);
+            eprintln!(
+                "Heartbeat:    {}",
                 if config.heartbeat.enabled {
                     format!("every {}min", config.heartbeat.interval_minutes)
                 } else {
                     "disabled".into()
                 }
             );
-            println!(
-                "🧠 Memory:         {} (auto-save: {})",
+            eprintln!(
+                "Memory:       {} (auto-save: {})",
                 config.memory.backend,
                 if config.memory.auto_save { "on" } else { "off" }
             );
 
-            println!();
-            println!("Security:");
-            println!("  Workspace only:    {}", config.autonomy.workspace_only);
-            println!(
+            eprintln!();
+            eprintln!("Security:");
+            eprintln!("  Workspace only:    {}", config.autonomy.workspace_only);
+            eprintln!(
                 "  Allowed commands:  {}",
                 config.autonomy.allowed_commands.join(", ")
             );
-            println!(
+            eprintln!(
                 "  Max actions/hour:  {}",
                 config.autonomy.max_actions_per_hour
             );
-            println!(
+            eprintln!(
                 "  Max cost/day:      ${:.2}",
                 f64::from(config.autonomy.max_cost_per_day_cents) / 100.0
             );
-            println!();
-            println!("Channels:");
-            println!("  CLI:      ✅ always");
+            eprintln!();
+            eprintln!("Channels:");
+            eprintln!(
+                "  CLI:      {} always",
+                redclaw::cli::Theme::success().apply_to("✓")
+            );
             for (name, configured) in [
                 ("Telegram", config.channels_config.telegram.is_some()),
                 ("Discord", config.channels_config.discord.is_some()),
                 ("Slack", config.channels_config.slack.is_some()),
                 ("Webhook", config.channels_config.webhook.is_some()),
             ] {
-                println!(
+                eprintln!(
                     "  {name:9} {}",
                     if configured {
-                        "✅ configured"
+                        format!(
+                            "{} configured",
+                            redclaw::cli::Theme::success().apply_to("✓")
+                        )
                     } else {
-                        "❌ not configured"
+                        format!(
+                            "{} not configured",
+                            redclaw::cli::Theme::error().apply_to("✗")
+                        )
                     }
                 );
             }
-            println!();
-            println!("Peripherals:");
-            println!(
+            eprintln!();
+            eprintln!("Peripherals:");
+            eprintln!(
                 "  Enabled:   {}",
                 if config.peripherals.enabled {
                     "yes"
@@ -498,7 +528,7 @@ async fn main() -> Result<()> {
                     "no"
                 }
             );
-            println!("  Boards:    {}", config.peripherals.boards.len());
+            eprintln!("  Boards:    {}", config.peripherals.boards.len());
 
             Ok(())
         }
