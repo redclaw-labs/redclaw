@@ -81,7 +81,7 @@ pub use redclaw::{HardwareCommands, PeripheralCommands};
 #[derive(Parser, Debug)]
 #[command(name = "redclaw")]
 #[command(author = "redf0x1")]
-#[command(version = "0.1.0")]
+#[command(version = "1.0.0")]
 #[command(about = "Battle-hardened AI agent runtime")]
 #[command(
     long_about = "RedClaw — Battle-hardened AI agent runtime. Built in Rust. OpenClaw-compatible."
