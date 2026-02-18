@@ -1,0 +1,12 @@
+/target/
+firmware/*/target
+*.db
+*.db-journal
+*.log
+.env
+.DS_Store
+*.swp
+*.swo
+.wt-pr37/
+redclaw_setup_reports/
+
