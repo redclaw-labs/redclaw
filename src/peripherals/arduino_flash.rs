@@ -43,7 +43,7 @@ pub fn ensure_arduino_cli() -> Result<()> {
             anyhow::bail!("arduino-cli still not found after install. Ensure it's in PATH.");
         }
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]

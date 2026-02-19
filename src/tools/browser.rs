@@ -1370,7 +1370,8 @@ mod native_backend {
                     });
 
                     if let Some(path_str) = path {
-                        std::fs::write(&path_str, &png)
+                        tokio::fs::write(&path_str, &png)
+                            .await
                             .with_context(|| format!("Failed to write screenshot to {path_str}"))?;
                         payload["path"] = Value::String(path_str);
                     } else {
