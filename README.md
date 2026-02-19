@@ -16,6 +16,7 @@
 ---
 
 ## Table of Contents
+
 - [Why RedClaw?](#why-redclaw)
 - [Performance](#performance)
 - [Features](#features)
@@ -29,6 +30,7 @@
 - [Community](#community)
 
 ## Why RedClaw?
+
 RedClaw is a Rust-built agent runtime that ships as a single small binary and stays fast under real workloads.
 It’s security-first by default (pairing, secrets, allowlists, workspace scoping) and designed for “deploy anywhere” environments.
 Everything important is trait-driven and swappable (providers, channels, tools, memory, runtime), so you can change integrations without rewriting your agent.
@@ -51,8 +53,9 @@ Everything important is trait-driven and swappable (providers, channels, tools, 
 
 ## Features
 
-### 🤖 30+ Model Providers
 <a name="providers"></a>
+
+### 🤖 30+ Model Providers
 
 RedClaw includes first-party providers plus OpenAI-compatible adapters and aliases.
 
@@ -71,8 +74,9 @@ Custom endpoints:
 - `custom:https://your-api.com` (OpenAI-compatible)
 - `anthropic-custom:https://your-api.com` (Anthropic-compatible)
 
-### 📡 14 Communication Channels
 <a name="channels"></a>
+
+### 📡 14 Communication Channels
 
 - CLI
 - Telegram
@@ -90,6 +94,7 @@ Custom endpoints:
 - QQ
 
 ### 🛠️ 18+ Built-in Tools
+
 Key tools shipped in-tree:
 - Shell execution (native runtime + sandbox policies)
 - File read/write (workspace-scoped)
@@ -103,11 +108,13 @@ Key tools shipped in-tree:
 - Delegation tool (optional, when extra agents are configured)
 
 ### 🔩 Hardware Peripherals
+
 - STM32
 - Raspberry Pi GPIO
 - Arduino
 
 ### 🔒 Security-First
+
 - Pairing for gateway access
 - Encrypted local secrets
 - Workspace-scoped file access
@@ -115,11 +122,13 @@ Key tools shipped in-tree:
 - Fail-fast behavior for unsupported or unsafe configs
 
 ### 🧠 Memory System
+
 - Backends: Markdown and SQLite
 - Hybrid retrieval: keyword search + vector similarity
 - Embedding provider support (including OpenAI and no-op)
 
 ### 📊 Observability
+
 - Cost tracking
 - Structured logging
 - Prometheus metrics
@@ -131,6 +140,7 @@ Key tools shipped in-tree:
 3) Start chatting
 
 ### From Source
+
 ```bash
 git clone https://github.com/redclaw-labs/redclaw.git
 cd redclaw
@@ -138,6 +148,7 @@ cargo build --release
 ```
 
 ### Configuration
+
 RedClaw reads `~/.redclaw/config.toml` (typically created by `redclaw onboard`).
 
 Minimal example:
@@ -159,6 +170,7 @@ redclaw agent -m "Hello, RedClaw!"
 ```
 
 ## Documentation
+
 Start in the [docs/](docs/) directory. A few useful entry points:
 - [docs/sandboxing.md](docs/sandboxing.md)
 - [docs/agnostic-security.md](docs/agnostic-security.md)
@@ -166,19 +178,34 @@ Start in the [docs/](docs/) directory. A few useful entry points:
 - [docs/network-deployment.md](docs/network-deployment.md)
 
 ## Contributing
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Implement a trait, submit a PR:
+
+- CI workflow guide: [docs/ci-map.md](docs/ci-map.md)
+- New `Provider` → `src/providers/`
+- New `Channel` → `src/channels/`
+- New `Observer` → `src/observability/`
+- New `Tool` → `src/tools/`
+- New `Memory` → `src/memory/`
+- New `Tunnel` → `src/tunnel/`
+- New `Skill` → `~/.redclaw/workspace/skills/<name>/`
 
 ## Security
+
 See [SECURITY.md](SECURITY.md).
 
 ## License
+
 MIT — see [LICENSE](LICENSE).
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Community
-- GitHub Issues: https://github.com/redclaw-labs/redclaw/issues
-- GitHub Discussions: https://github.com/redclaw-labs/redclaw/discussions
+
+- [GitHub Issues](https://github.com/redclaw-labs/redclaw/issues)
+- [GitHub Discussions](https://github.com/redclaw-labs/redclaw/discussions)
+
+```bash
 cargo test               # 1,017 tests
 cargo clippy             # Lint (0 warnings)
 cargo fmt                # Format
@@ -240,23 +267,6 @@ A heartfelt thank you to the communities and institutions that inspire and fuel 
 
 We're building in the open because the best ideas come from everywhere. If you're reading this, you're part of it. Welcome. 🦀❤️
 
-## License
-
-MIT — see [LICENSE](LICENSE)
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Implement a trait, submit a PR:
-- CI workflow guide: [docs/ci-map.md](docs/ci-map.md)
-- New `Provider` → `src/providers/`
-- New `Channel` → `src/channels/`
-- New `Observer` → `src/observability/`
-- New `Tool` → `src/tools/`
-- New `Memory` → `src/memory/`
-- New `Tunnel` → `src/tunnel/`
-- New `Skill` → `~/.redclaw/workspace/skills/<name>/`
-
-
 ---
 
 **RedClaw** — Zero overhead. Zero compromise. Deploy anywhere. Swap anything. 🦀
@@ -267,4 +277,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Implement a trait, submit a PR:
   <a href="https://www.star-history.com/#redclaw-labs/redclaw&Date">
     <img src="https://api.star-history.com/svg?repos=redclaw-labs/redclaw&type=Date" alt="Star History Chart" />
   </a>
+
 </p>
