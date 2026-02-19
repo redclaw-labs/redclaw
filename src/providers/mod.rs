@@ -1136,6 +1136,10 @@ pub fn list_providers() -> Vec<ProviderInfo> {
 mod tests {
     use super::*;
 
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     struct EnvGuard {
         key: &'static str,
         original: Option<String>,
@@ -1171,6 +1175,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_uses_minimax_oauth_env_for_placeholder() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
         let _oauth_guard = EnvGuard::set(MINIMAX_OAUTH_TOKEN_ENV, Some("oauth-token"));
         let _api_guard = EnvGuard::set(MINIMAX_API_KEY_ENV, Some("api-key"));
         let _refresh_guard = EnvGuard::set(MINIMAX_OAUTH_REFRESH_TOKEN_ENV, None);
@@ -1182,6 +1188,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_falls_back_to_minimax_api_key_for_placeholder() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
         let _oauth_guard = EnvGuard::set(MINIMAX_OAUTH_TOKEN_ENV, None);
         let _api_guard = EnvGuard::set(MINIMAX_API_KEY_ENV, Some("api-key"));
         let _refresh_guard = EnvGuard::set(MINIMAX_OAUTH_REFRESH_TOKEN_ENV, None);
@@ -1193,6 +1201,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_placeholder_ignores_generic_api_key_fallback() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
         let _oauth_guard = EnvGuard::set(MINIMAX_OAUTH_TOKEN_ENV, None);
         let _api_guard = EnvGuard::set(MINIMAX_API_KEY_ENV, None);
         let _refresh_guard = EnvGuard::set(MINIMAX_OAUTH_REFRESH_TOKEN_ENV, None);
