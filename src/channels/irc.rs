@@ -449,13 +449,22 @@ impl Channel for IrcChannel {
                 "AUTHENTICATE" => {
                     // Server sends "AUTHENTICATE +" to request credentials
                     if sasl_pending && msg.params.first().is_some_and(|p| p == "+") {
-                        let encoded = encode_sasl_plain(
-                            &current_nick,
-                            self.sasl_password.as_deref().unwrap_or(""),
-                        );
-                        let mut guard = self.writer.lock().await;
-                        if let Some(ref mut w) = *guard {
-                            Self::send_raw(w, &format!("AUTHENTICATE {encoded}")).await?;
+                        // sasl_password is loaded from runtime config, not hard-coded
+                        if let Some(password) = self.sasl_password.as_deref() {
+                            let encoded = encode_sasl_plain(&current_nick, password);
+                            let mut guard = self.writer.lock().await;
+                            if let Some(ref mut w) = *guard {
+                                Self::send_raw(w, &format!("AUTHENTICATE {encoded}")).await?;
+                            }
+                        } else {
+                            tracing::warn!(
+                                "IRC SASL requested by server but no sasl_password is configured; continuing without SASL"
+                            );
+                            sasl_pending = false;
+                            let mut guard = self.writer.lock().await;
+                            if let Some(ref mut w) = *guard {
+                                Self::send_raw(w, "CAP END").await?;
+                            }
                         }
                     }
                 }
@@ -536,7 +545,7 @@ impl Channel for IrcChannel {
                     // Determine reply target: if sent to a channel, reply to channel;
                     // if DM (target == our nick), reply to sender
                     let is_channel = target.starts_with('#') || target.starts_with('&');
-                    let reply_to = if is_channel {
+                    let reply_target = if is_channel {
                         target.to_string()
                     } else {
                         sender_nick.to_string()
@@ -550,8 +559,8 @@ impl Channel for IrcChannel {
                     let seq = MSG_SEQ.fetch_add(1, Ordering::Relaxed);
                     let channel_msg = ChannelMessage {
                         id: format!("irc_{}_{seq}", chrono::Utc::now().timestamp_millis()),
-                        sender: reply_to.clone(),
-                        reply_target: reply_to,
+                        sender: sender_nick.to_string(),
+                        reply_target,
                         content,
                         channel: "irc".to_string(),
                         timestamp: std::time::SystemTime::now()

@@ -13,7 +13,6 @@ pub struct LarkChannel {
     verification_token: String,
     port: u16,
     allowed_users: Vec<String>,
-    client: reqwest::Client,
     /// Cached tenant access token
     tenant_token: Arc<RwLock<Option<String>>>,
 }
@@ -32,9 +31,12 @@ impl LarkChannel {
             verification_token,
             port,
             allowed_users,
-            client: reqwest::Client::new(),
             tenant_token: Arc::new(RwLock::new(None)),
         }
+    }
+
+    fn http_client(&self) -> reqwest::Client {
+        crate::config::build_runtime_proxy_client("channel.lark")
     }
 
     /// Check if a user open_id is allowed
@@ -58,7 +60,7 @@ impl LarkChannel {
             "app_secret": self.app_secret,
         });
 
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = self.http_client().post(&url).json(&body).send().await?;
         let data: serde_json::Value = resp.json().await?;
 
         let code = data.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
@@ -202,7 +204,7 @@ impl Channel for LarkChannel {
         });
 
         let resp = self
-            .client
+            .http_client()
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json; charset=utf-8")
@@ -215,7 +217,7 @@ impl Channel for LarkChannel {
             self.invalidate_token().await;
             let new_token = self.get_tenant_access_token().await?;
             let retry_resp = self
-                .client
+                .http_client()
                 .post(&url)
                 .header("Authorization", format!("Bearer {new_token}"))
                 .header("Content-Type", "application/json; charset=utf-8")
