@@ -8,8 +8,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 pub struct OpenRouterProvider {
-    api_key: Option<String>,
-    client: Client,
+    credential: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,7 +36,20 @@ struct Choice {
 
 #[derive(Debug, Deserialize)]
 struct ResponseMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    /// Reasoning/thinking models may return output in `reasoning_content`.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+impl ResponseMessage {
+    fn effective_content(&self) -> String {
+        match &self.content {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => self.reasoning_content.clone().unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -105,19 +117,26 @@ struct NativeChoice {
 struct NativeResponseMessage {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning/thinking models may return output in `reasoning_content`.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<NativeToolCall>>,
+}
+
+impl NativeResponseMessage {
+    fn effective_content(&self) -> Option<String> {
+        match &self.content {
+            Some(c) if !c.is_empty() => Some(c.clone()),
+            _ => self.reasoning_content.clone(),
+        }
+    }
 }
 
 impl OpenRouterProvider {
     pub fn new(api_key: Option<&str>) -> Self {
         Self {
-            api_key: api_key.map(ToString::to_string),
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            credential: api_key.map(ToString::to_string),
         }
     }
 
@@ -209,6 +228,7 @@ impl OpenRouterProvider {
     }
 
     fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
+        let text = message.effective_content();
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -220,10 +240,11 @@ impl OpenRouterProvider {
             })
             .collect::<Vec<_>>();
 
-        ProviderChatResponse {
-            text: message.content,
-            tool_calls,
-        }
+        ProviderChatResponse { text, tool_calls }
+    }
+
+    fn http_client(&self) -> Client {
+        crate::config::build_runtime_proxy_client_with_timeouts("provider.openrouter", 120, 10)
     }
 }
 
@@ -232,10 +253,10 @@ impl Provider for OpenRouterProvider {
     async fn warmup(&self) -> anyhow::Result<()> {
         // Hit a lightweight endpoint to establish TLS + HTTP/2 connection pool.
         // This prevents the first real chat request from timing out on cold start.
-        if let Some(api_key) = self.api_key.as_ref() {
-            self.client
+        if let Some(credential) = self.credential.as_ref() {
+            self.http_client()
                 .get("https://openrouter.ai/api/v1/auth/key")
-                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Authorization", format!("Bearer {credential}"))
                 .send()
                 .await?
                 .error_for_status()?;
@@ -250,7 +271,7 @@ impl Provider for OpenRouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let api_key = self.api_key.as_ref()
+        let credential = self.credential.as_ref()
             .ok_or_else(|| anyhow::anyhow!("OpenRouter API key not set. Run `redclaw onboard` or set OPENROUTER_API_KEY env var."))?;
 
         let mut messages = Vec::new();
@@ -274,9 +295,9 @@ impl Provider for OpenRouterProvider {
         };
 
         let response = self
-            .client
+            .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Authorization", format!("Bearer {credential}"))
             .header("HTTP-Referer", "https://github.com/redclaw-labs/redclaw")
             .header("X-Title", "RedClaw")
             .json(&request)
@@ -293,7 +314,7 @@ impl Provider for OpenRouterProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.effective_content())
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))
     }
 
@@ -303,7 +324,7 @@ impl Provider for OpenRouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let api_key = self.api_key.as_ref()
+        let credential = self.credential.as_ref()
             .ok_or_else(|| anyhow::anyhow!("OpenRouter API key not set. Run `redclaw onboard` or set OPENROUTER_API_KEY env var."))?;
 
         let api_messages: Vec<Message> = messages
@@ -321,9 +342,9 @@ impl Provider for OpenRouterProvider {
         };
 
         let response = self
-            .client
+            .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Authorization", format!("Bearer {credential}"))
             .header("HTTP-Referer", "https://github.com/redclaw-labs/redclaw")
             .header("X-Title", "RedClaw")
             .json(&request)
@@ -340,7 +361,7 @@ impl Provider for OpenRouterProvider {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.effective_content())
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))
     }
 
@@ -350,7 +371,7 @@ impl Provider for OpenRouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
-        let api_key = self.api_key.as_ref().ok_or_else(|| {
+        let credential = self.credential.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
             "OpenRouter API key not set. Run `redclaw onboard` or set OPENROUTER_API_KEY env var."
         )
@@ -366,9 +387,9 @@ impl Provider for OpenRouterProvider {
         };
 
         let response = self
-            .client
+            .http_client()
             .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Authorization", format!("Bearer {credential}"))
             .header("HTTP-Referer", "https://github.com/redclaw-labs/redclaw")
             .header("X-Title", "RedClaw")
             .json(&native_request)
@@ -402,13 +423,13 @@ mod tests {
     #[test]
     fn creates_with_key() {
         let provider = OpenRouterProvider::new(Some("sk-or-123"));
-        assert_eq!(provider.api_key.as_deref(), Some("sk-or-123"));
+        assert_eq!(provider.credential.as_deref(), Some("sk-or-123"));
     }
 
     #[test]
     fn creates_without_key() {
         let provider = OpenRouterProvider::new(None);
-        assert!(provider.api_key.is_none());
+        assert!(provider.credential.is_none());
     }
 
     #[tokio::test]
@@ -514,7 +535,10 @@ mod tests {
         let response: ApiChatResponse = serde_json::from_str(json).unwrap();
 
         assert_eq!(response.choices.len(), 1);
-        assert_eq!(response.choices[0].message.content, "Hi from OpenRouter");
+        assert_eq!(
+            response.choices[0].message.effective_content(),
+            "Hi from OpenRouter"
+        );
     }
 
     #[test]
