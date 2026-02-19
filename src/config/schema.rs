@@ -10,6 +10,41 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+
+const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
+    "provider.anthropic",
+    "provider.compatible",
+    "provider.copilot",
+    "provider.gemini",
+    "provider.glm",
+    "provider.ollama",
+    "provider.openai",
+    "provider.openrouter",
+    "channel.dingtalk",
+    "channel.discord",
+    "channel.lark",
+    "channel.matrix",
+    "channel.mattermost",
+    "channel.qq",
+    "channel.signal",
+    "channel.slack",
+    "channel.telegram",
+    "channel.whatsapp",
+    "tool.browser",
+    "tool.composio",
+    "tool.http_request",
+    "tool.pushover",
+    "memory.embeddings",
+    "tunnel.custom",
+];
+
+const SUPPORTED_PROXY_SERVICE_SELECTORS: &[&str] =
+    &["provider.*", "channel.*", "tool.*", "memory.*", "tunnel.*"];
+
+static RUNTIME_PROXY_CONFIG: OnceLock<RwLock<ProxyConfig>> = OnceLock::new();
+static RUNTIME_PROXY_CLIENT_CACHE: OnceLock<RwLock<HashMap<String, reqwest::Client>>> =
+    OnceLock::new();
 
 // ── Top-level config ──────────────────────────────────────────────
 
@@ -52,6 +87,10 @@ pub struct Config {
     #[serde(default)]
     pub model_routes: Vec<ModelRouteConfig>,
 
+    /// Automatic query classification — maps user messages to model hints.
+    #[serde(default)]
+    pub query_classification: QueryClassificationConfig,
+
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
 
@@ -60,6 +99,9 @@ pub struct Config {
 
     #[serde(default)]
     pub memory: MemoryConfig,
+
+    #[serde(default)]
+    pub storage: StorageConfig,
 
     #[serde(default)]
     pub tunnel: TunnelConfig,
@@ -78,6 +120,12 @@ pub struct Config {
 
     #[serde(default)]
     pub http_request: HttpRequestConfig,
+
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 
     #[serde(default)]
     pub identity: IdentityConfig,
@@ -504,7 +552,7 @@ impl Default for PeripheralBoardConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
-    /// Gateway port (default: 8080)
+    /// Gateway port (default: 3000)
     #[serde(default = "default_gateway_port")]
     pub port: u16,
     /// Gateway host (default: 127.0.0.1)
@@ -531,6 +579,19 @@ pub struct GatewayConfig {
     /// TTL for webhook idempotency keys.
     #[serde(default = "default_idempotency_ttl_secs")]
     pub idempotency_ttl_secs: u64,
+
+    /// Max distinct keys tracked for rate limiting.
+    #[serde(default)]
+    pub rate_limit_max_keys: usize,
+
+    /// Max distinct idempotency keys tracked.
+    #[serde(default)]
+    pub idempotency_max_keys: usize,
+
+    /// Trust X-Forwarded-* headers for client IP attribution (default: false).
+    /// Only enable behind a trusted reverse proxy.
+    #[serde(default)]
+    pub trust_forwarded_headers: bool,
 }
 
 fn default_gateway_port() -> u16 {
@@ -568,6 +629,9 @@ impl Default for GatewayConfig {
             pair_rate_limit_per_minute: default_pair_rate_limit(),
             webhook_rate_limit_per_minute: default_webhook_rate_limit(),
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
+            rate_limit_max_keys: 10_000,
+            idempotency_max_keys: 10_000,
+            trust_forwarded_headers: false,
         }
     }
 }
@@ -742,12 +806,529 @@ fn default_http_timeout_secs() -> u64 {
     30
 }
 
+// ── Web search ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// Enable `web_search_tool` for web searches
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Search provider: "duckduckgo" (free, no API key) or "brave" (requires API key)
+    #[serde(default = "default_web_search_provider")]
+    pub provider: String,
+    /// Brave Search API key (required if provider is "brave")
+    #[serde(default)]
+    pub brave_api_key: Option<String>,
+    /// Maximum results per search (1-10)
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: usize,
+    /// Request timeout in seconds
+    #[serde(default = "default_web_search_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_web_search_provider() -> String {
+    "duckduckgo".into()
+}
+
+fn default_web_search_max_results() -> usize {
+    5
+}
+
+fn default_web_search_timeout_secs() -> u64 {
+    15
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: default_web_search_provider(),
+            brave_api_key: None,
+            max_results: default_web_search_max_results(),
+            timeout_secs: default_web_search_timeout_secs(),
+        }
+    }
+}
+
+// ── Proxy ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyScope {
+    Environment,
+    #[default]
+    Redclaw,
+    Services,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// Enable proxy support for selected scope.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Proxy URL for HTTP requests (supports http, https, socks5, socks5h).
+    #[serde(default)]
+    pub http_proxy: Option<String>,
+    /// Proxy URL for HTTPS requests (supports http, https, socks5, socks5h).
+    #[serde(default)]
+    pub https_proxy: Option<String>,
+    /// Fallback proxy URL for all schemes.
+    #[serde(default)]
+    pub all_proxy: Option<String>,
+    /// No-proxy bypass list. Same format as NO_PROXY.
+    #[serde(default)]
+    pub no_proxy: Vec<String>,
+    /// Proxy application scope.
+    #[serde(default)]
+    pub scope: ProxyScope,
+    /// Service selectors used when scope = "services".
+    #[serde(default)]
+    pub services: Vec<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            http_proxy: None,
+            https_proxy: None,
+            all_proxy: None,
+            no_proxy: Vec::new(),
+            scope: ProxyScope::Redclaw,
+            services: Vec::new(),
+        }
+    }
+}
+
+impl ProxyConfig {
+    pub fn supported_service_keys() -> &'static [&'static str] {
+        SUPPORTED_PROXY_SERVICE_KEYS
+    }
+
+    pub fn supported_service_selectors() -> &'static [&'static str] {
+        SUPPORTED_PROXY_SERVICE_SELECTORS
+    }
+
+    pub fn has_any_proxy_url(&self) -> bool {
+        normalize_proxy_url_option(self.http_proxy.as_deref()).is_some()
+            || normalize_proxy_url_option(self.https_proxy.as_deref()).is_some()
+            || normalize_proxy_url_option(self.all_proxy.as_deref()).is_some()
+    }
+
+    pub fn normalized_services(&self) -> Vec<String> {
+        normalize_service_list(self.services.clone())
+    }
+
+    pub fn normalized_no_proxy(&self) -> Vec<String> {
+        normalize_no_proxy_list(self.no_proxy.clone())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("http_proxy", self.http_proxy.as_deref()),
+            ("https_proxy", self.https_proxy.as_deref()),
+            ("all_proxy", self.all_proxy.as_deref()),
+        ] {
+            if let Some(url) = normalize_proxy_url_option(value) {
+                validate_proxy_url(field, &url)?;
+            }
+        }
+
+        for selector in self.normalized_services() {
+            if !is_supported_proxy_service_selector(&selector) {
+                anyhow::bail!(
+                    "Unsupported proxy service selector '{selector}'. Use tool `proxy_config` action `list_services` for valid values"
+                );
+            }
+        }
+
+        if self.enabled && !self.has_any_proxy_url() {
+            anyhow::bail!(
+                "Proxy is enabled but no proxy URL is configured. Set at least one of http_proxy, https_proxy, or all_proxy"
+            );
+        }
+
+        if self.enabled
+            && self.scope == ProxyScope::Services
+            && self.normalized_services().is_empty()
+        {
+            anyhow::bail!(
+                "proxy.scope='services' requires a non-empty proxy.services list when proxy is enabled"
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn should_apply_to_service(&self, service_key: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        match self.scope {
+            ProxyScope::Environment => false,
+            ProxyScope::Redclaw => true,
+            ProxyScope::Services => {
+                let service_key = service_key.trim().to_ascii_lowercase();
+                if service_key.is_empty() {
+                    return false;
+                }
+
+                self.normalized_services()
+                    .iter()
+                    .any(|selector| service_selector_matches(selector, &service_key))
+            }
+        }
+    }
+
+    pub fn apply_to_reqwest_builder(
+        &self,
+        mut builder: reqwest::ClientBuilder,
+        service_key: &str,
+    ) -> reqwest::ClientBuilder {
+        if !self.should_apply_to_service(service_key) {
+            return builder;
+        }
+
+        let no_proxy = self.no_proxy_value();
+
+        if let Some(url) = normalize_proxy_url_option(self.all_proxy.as_deref()) {
+            match reqwest::Proxy::all(&url) {
+                Ok(proxy) => {
+                    builder = builder.proxy(apply_no_proxy(proxy, no_proxy.clone()));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        proxy_url = %url,
+                        service_key,
+                        "Ignoring invalid all_proxy URL: {error}"
+                    );
+                }
+            }
+        }
+
+        if let Some(url) = normalize_proxy_url_option(self.http_proxy.as_deref()) {
+            match reqwest::Proxy::http(&url) {
+                Ok(proxy) => {
+                    builder = builder.proxy(apply_no_proxy(proxy, no_proxy.clone()));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        proxy_url = %url,
+                        service_key,
+                        "Ignoring invalid http_proxy URL: {error}"
+                    );
+                }
+            }
+        }
+
+        if let Some(url) = normalize_proxy_url_option(self.https_proxy.as_deref()) {
+            match reqwest::Proxy::https(&url) {
+                Ok(proxy) => {
+                    builder = builder.proxy(apply_no_proxy(proxy, no_proxy));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        proxy_url = %url,
+                        service_key,
+                        "Ignoring invalid https_proxy URL: {error}"
+                    );
+                }
+            }
+        }
+
+        builder
+    }
+
+    pub fn apply_to_process_env(&self) {
+        set_proxy_env_pair("HTTP_PROXY", self.http_proxy.as_deref());
+        set_proxy_env_pair("HTTPS_PROXY", self.https_proxy.as_deref());
+        set_proxy_env_pair("ALL_PROXY", self.all_proxy.as_deref());
+
+        let no_proxy_joined = {
+            let list = self.normalized_no_proxy();
+            (!list.is_empty()).then(|| list.join(","))
+        };
+        set_proxy_env_pair("NO_PROXY", no_proxy_joined.as_deref());
+    }
+
+    pub fn clear_process_env() {
+        clear_proxy_env_pair("HTTP_PROXY");
+        clear_proxy_env_pair("HTTPS_PROXY");
+        clear_proxy_env_pair("ALL_PROXY");
+        clear_proxy_env_pair("NO_PROXY");
+    }
+
+    fn no_proxy_value(&self) -> Option<reqwest::NoProxy> {
+        let joined = {
+            let list = self.normalized_no_proxy();
+            (!list.is_empty()).then(|| list.join(","))
+        };
+        joined.as_deref().and_then(reqwest::NoProxy::from_string)
+    }
+}
+
+fn apply_no_proxy(proxy: reqwest::Proxy, no_proxy: Option<reqwest::NoProxy>) -> reqwest::Proxy {
+    proxy.no_proxy(no_proxy)
+}
+
+fn normalize_proxy_url_option(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn normalize_no_proxy_list(values: Vec<String>) -> Vec<String> {
+    normalize_comma_values(values)
+}
+
+fn normalize_service_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = normalize_comma_values(values)
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_comma_values(values: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for value in values {
+        for part in value.split(',') {
+            let normalized = part.trim();
+            if normalized.is_empty() {
+                continue;
+            }
+            output.push(normalized.to_string());
+        }
+    }
+    output.sort_unstable();
+    output.dedup();
+    output
+}
+
+fn is_supported_proxy_service_selector(selector: &str) -> bool {
+    if SUPPORTED_PROXY_SERVICE_KEYS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(selector))
+    {
+        return true;
+    }
+
+    SUPPORTED_PROXY_SERVICE_SELECTORS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(selector))
+}
+
+fn service_selector_matches(selector: &str, service_key: &str) -> bool {
+    if selector == service_key {
+        return true;
+    }
+
+    if let Some(prefix) = selector.strip_suffix(".*") {
+        return service_key.starts_with(prefix)
+            && service_key
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('.'));
+    }
+
+    false
+}
+
+fn validate_proxy_url(field: &str, url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| anyhow::anyhow!("Invalid {field} URL '{url}': {error}"))?;
+    match parsed.scheme() {
+        "http" | "https" | "socks5" | "socks5h" => Ok(()),
+        scheme => anyhow::bail!(
+            "Invalid {field} scheme '{scheme}' for proxy URL '{url}'. Supported schemes: http, https, socks5, socks5h"
+        ),
+    }
+}
+
+fn set_proxy_env_pair(key: &str, value: Option<&str>) {
+    if let Some(value) = normalize_proxy_url_option(value) {
+        std::env::set_var(key, value);
+    } else {
+        clear_proxy_env_pair(key);
+    }
+}
+
+fn clear_proxy_env_pair(key: &str) {
+    std::env::remove_var(key);
+}
+
+fn runtime_proxy_config_lock() -> &'static RwLock<ProxyConfig> {
+    RUNTIME_PROXY_CONFIG.get_or_init(|| RwLock::new(ProxyConfig::default()))
+}
+
+fn runtime_proxy_client_cache_lock() -> &'static RwLock<HashMap<String, reqwest::Client>> {
+    RUNTIME_PROXY_CLIENT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub fn runtime_proxy_config() -> ProxyConfig {
+    runtime_proxy_config_lock()
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_runtime_proxy_config(config: ProxyConfig) {
+    if let Ok(mut guard) = runtime_proxy_config_lock().write() {
+        *guard = config;
+    }
+
+    if let Ok(mut cache) = runtime_proxy_client_cache_lock().write() {
+        cache.clear();
+    }
+}
+
+fn runtime_proxy_cache_key(
+    service_key: &str,
+    timeout_secs: Option<u64>,
+    connect_timeout_secs: Option<u64>,
+) -> String {
+    match (timeout_secs, connect_timeout_secs) {
+        (Some(timeout), Some(connect_timeout)) => {
+            format!("{service_key}:{timeout}:{connect_timeout}")
+        }
+        _ => service_key.to_string(),
+    }
+}
+
+fn runtime_proxy_cached_client(cache_key: &str) -> Option<reqwest::Client> {
+    runtime_proxy_client_cache_lock()
+        .read()
+        .ok()
+        .and_then(|cache| cache.get(cache_key).cloned())
+}
+
+fn set_runtime_proxy_cached_client(cache_key: String, client: reqwest::Client) {
+    if let Ok(mut cache) = runtime_proxy_client_cache_lock().write() {
+        cache.insert(cache_key, client);
+    }
+}
+
+pub fn apply_runtime_proxy_to_builder(
+    builder: reqwest::ClientBuilder,
+    service_key: &str,
+) -> reqwest::ClientBuilder {
+    runtime_proxy_config().apply_to_reqwest_builder(builder, service_key)
+}
+
+pub fn build_runtime_proxy_client(service_key: &str) -> reqwest::Client {
+    let cache_key = runtime_proxy_cache_key(service_key, None, None);
+    if let Some(client) = runtime_proxy_cached_client(&cache_key) {
+        return client;
+    }
+
+    let builder = apply_runtime_proxy_to_builder(reqwest::Client::builder(), service_key);
+    let client = builder.build().unwrap_or_else(|error| {
+        tracing::warn!(service_key, "Failed to build proxied client: {error}");
+        reqwest::Client::new()
+    });
+    set_runtime_proxy_cached_client(cache_key, client.clone());
+    client
+}
+
+pub fn build_runtime_proxy_client_with_timeouts(
+    service_key: &str,
+    timeout_secs: u64,
+    connect_timeout_secs: u64,
+) -> reqwest::Client {
+    let cache_key =
+        runtime_proxy_cache_key(service_key, Some(timeout_secs), Some(connect_timeout_secs));
+    if let Some(client) = runtime_proxy_cached_client(&cache_key) {
+        return client;
+    }
+
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs));
+    let builder = apply_runtime_proxy_to_builder(builder, service_key);
+    let client = builder.build().unwrap_or_else(|error| {
+        tracing::warn!(
+            service_key,
+            "Failed to build proxied timeout client: {error}"
+        );
+        reqwest::Client::new()
+    });
+    set_runtime_proxy_cached_client(cache_key, client.clone());
+    client
+}
+
+// ── Storage (optional provider override) ─────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StorageConfig {
+    #[serde(default)]
+    pub provider: StorageProviderSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StorageProviderSection {
+    #[serde(default)]
+    pub config: StorageProviderConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageProviderConfig {
+    /// Storage engine key (e.g. "postgres", "sqlite").
+    #[serde(default)]
+    pub provider: String,
+
+    /// Connection URL for remote providers.
+    /// Accepts legacy aliases: dbURL, database_url, databaseUrl.
+    #[serde(
+        default,
+        alias = "dbURL",
+        alias = "database_url",
+        alias = "databaseUrl"
+    )]
+    pub db_url: Option<String>,
+
+    /// Database schema for SQL backends.
+    #[serde(default = "default_storage_schema")]
+    pub schema: String,
+
+    /// Table name for memory entries.
+    #[serde(default = "default_storage_table")]
+    pub table: String,
+
+    /// Optional connection timeout in seconds for remote providers.
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+}
+
+fn default_storage_schema() -> String {
+    "public".into()
+}
+
+fn default_storage_table() -> String {
+    "memories".into()
+}
+
+impl Default for StorageProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            db_url: None,
+            schema: default_storage_schema(),
+            table: default_storage_table(),
+            connect_timeout_secs: None,
+        }
+    }
+}
+
 // ── Memory ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct MemoryConfig {
-    /// "sqlite" | "lucid" | "markdown" | "none" (`none` = explicit no-op memory)
+    /// "sqlite" | "lucid" | "postgres" | "markdown" | "none" (`none` = explicit no-op memory)
+    ///
+    /// `postgres` requires `[storage.provider.config]` with `db_url` (`dbURL` alias supported).
     pub backend: String,
     /// Auto-save conversation context to memory
     pub auto_save: bool,
@@ -778,6 +1359,11 @@ pub struct MemoryConfig {
     /// Weight for keyword BM25 in hybrid search (0.0–1.0)
     #[serde(default = "default_keyword_weight")]
     pub keyword_weight: f64,
+    /// Minimum hybrid score (0.0–1.0) for a memory to be included in context.
+    /// Memories scoring below this threshold are dropped to prevent irrelevant
+    /// context from bleeding into conversations. Default: 0.4
+    #[serde(default = "default_min_relevance_score")]
+    pub min_relevance_score: f64,
     /// Max embedding cache entries before LRU eviction
     #[serde(default = "default_cache_size")]
     pub embedding_cache_size: usize,
@@ -806,6 +1392,12 @@ pub struct MemoryConfig {
     /// Auto-hydrate from MEMORY_SNAPSHOT.md when brain.db is missing
     #[serde(default = "default_true")]
     pub auto_hydrate: bool,
+
+    // ── SQLite backend options ─────────────────────────────────
+    /// For sqlite backend: max seconds to wait when opening the DB (e.g. file locked).
+    /// None = wait indefinitely (default). Recommended max: 300.
+    #[serde(default)]
+    pub sqlite_open_timeout_secs: Option<u64>,
 }
 
 fn default_embedding_provider() -> String {
@@ -835,6 +1427,9 @@ fn default_vector_weight() -> f64 {
 fn default_keyword_weight() -> f64 {
     0.3
 }
+fn default_min_relevance_score() -> f64 {
+    0.4
+}
 fn default_cache_size() -> usize {
     10_000
 }
@@ -862,6 +1457,7 @@ impl Default for MemoryConfig {
             embedding_dimensions: default_embedding_dims(),
             vector_weight: default_vector_weight(),
             keyword_weight: default_keyword_weight(),
+            min_relevance_score: default_min_relevance_score(),
             embedding_cache_size: default_cache_size(),
             chunk_max_tokens: default_chunk_size(),
             response_cache_enabled: false,
@@ -870,6 +1466,7 @@ impl Default for MemoryConfig {
             snapshot_enabled: false,
             snapshot_on_hygiene: false,
             auto_hydrate: true,
+            sqlite_open_timeout_secs: None,
         }
     }
 }
@@ -1214,6 +1811,40 @@ pub struct ModelRouteConfig {
     pub api_key: Option<String>,
 }
 
+// ── Query Classification ─────────────────────────────────────────
+
+/// Automatic query classification — classifies user messages by keyword/pattern
+/// and routes to the appropriate model hint. Disabled by default.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QueryClassificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub rules: Vec<ClassificationRule>,
+}
+
+/// A single classification rule mapping message patterns to a model hint.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClassificationRule {
+    /// Must match a `[[model_routes]]` hint value.
+    pub hint: String,
+    /// Case-insensitive substring matches.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// Case-sensitive literal matches (for "```", "fn ", etc.).
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    /// Only match if message length >= N chars.
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    /// Only match if message length <= N chars.
+    #[serde(default)]
+    pub max_length: Option<usize>,
+    /// Higher priority rules are checked first.
+    #[serde(default)]
+    pub priority: i32,
+}
+
 // ── Heartbeat ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1343,7 +1974,34 @@ impl Default for ChannelsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
     pub bot_token: String,
+    #[serde(default)]
     pub allowed_users: Vec<String>,
+
+    /// Streaming mode for incremental message updates.
+    #[serde(default)]
+    pub stream_mode: StreamMode,
+
+    /// Minimum interval between streaming draft updates.
+    #[serde(default = "default_draft_update_interval_ms")]
+    pub draft_update_interval_ms: u64,
+
+    /// When true, only respond to messages that explicitly @-mention the bot in group chats.
+    /// Direct messages always work regardless of this setting.
+    #[serde(default)]
+    pub mention_only: bool,
+}
+
+fn default_draft_update_interval_ms() -> u64 {
+    1000
+}
+
+/// Streaming mode for channels that support incremental message updates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamMode {
+    #[default]
+    Off,
+    Partial,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1374,6 +2032,14 @@ pub struct MattermostConfig {
     pub channel_id: Option<String>,
     #[serde(default)]
     pub allowed_users: Vec<String>,
+
+    /// Reply in threads when supported. Defaults to `true` when not set.
+    #[serde(default)]
+    pub thread_replies: Option<bool>,
+
+    /// When true, only respond when the bot is mentioned in channel messages.
+    #[serde(default)]
+    pub mention_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1391,6 +2057,10 @@ pub struct IMessageConfig {
 pub struct MatrixConfig {
     pub homeserver: String,
     pub access_token: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub room_id: String,
     pub allowed_users: Vec<String>,
 }
@@ -1681,7 +2351,7 @@ impl Default for Config {
             config_path: redclaw_dir.join("config.toml"),
             api_key: None,
             default_provider: Some("openrouter".to_string()),
-            default_model: Some("anthropic/claude-sonnet-4".to_string()),
+            default_model: Some("anthropic/claude-sonnet-4.6".to_string()),
             default_temperature: 0.7,
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
@@ -1691,15 +2361,19 @@ impl Default for Config {
             scheduler: SchedulerConfig::default(),
             agent: AgentConfig::default(),
             model_routes: Vec::new(),
+            query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
+            storage: StorageConfig::default(),
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
             composio: ComposioConfig::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
+            web_search: WebSearchConfig::default(),
+            proxy: ProxyConfig::default(),
             identity: IdentityConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
@@ -2195,6 +2869,7 @@ mod tests {
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             model_routes: Vec::new(),
+            query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig {
                 enabled: true,
                 interval_minutes: 15,
@@ -2204,6 +2879,9 @@ mod tests {
                 telegram: Some(TelegramConfig {
                     bot_token: "123:ABC".into(),
                     allowed_users: vec!["user1".into()],
+                    stream_mode: StreamMode::default(),
+                    draft_update_interval_ms: 1000,
+                    mention_only: false,
                 }),
                 discord: None,
                 slack: None,
@@ -2220,12 +2898,15 @@ mod tests {
                 qq: None,
             },
             memory: MemoryConfig::default(),
+            storage: StorageConfig::default(),
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
             composio: ComposioConfig::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
+            web_search: WebSearchConfig::default(),
+            proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
             identity: IdentityConfig::default(),
             cost: CostConfig::default(),
@@ -2325,15 +3006,19 @@ tool_dispatcher = "xml"
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             model_routes: Vec::new(),
+            query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
+            storage: StorageConfig::default(),
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
             composio: ComposioConfig::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
+            web_search: WebSearchConfig::default(),
+            proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
             identity: IdentityConfig::default(),
             cost: CostConfig::default(),
@@ -2392,6 +3077,9 @@ tool_dispatcher = "xml"
         let tc = TelegramConfig {
             bot_token: "123:XYZ".into(),
             allowed_users: vec!["alice".into(), "bob".into()],
+            stream_mode: StreamMode::default(),
+            draft_update_interval_ms: 1000,
+            mention_only: false,
         };
         let json = serde_json::to_string(&tc).unwrap();
         let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
@@ -2464,6 +3152,8 @@ tool_dispatcher = "xml"
         let mc = MatrixConfig {
             homeserver: "https://matrix.org".into(),
             access_token: "syt_token_abc".into(),
+            user_id: None,
+            device_id: None,
             room_id: "!room123:matrix.org".into(),
             allowed_users: vec!["@user:matrix.org".into()],
         };
@@ -2480,6 +3170,8 @@ tool_dispatcher = "xml"
         let mc = MatrixConfig {
             homeserver: "https://synapse.local:8448".into(),
             access_token: "tok".into(),
+            user_id: None,
+            device_id: None,
             room_id: "!abc:synapse.local".into(),
             allowed_users: vec!["@admin:synapse.local".into(), "*".into()],
         };
@@ -2552,6 +3244,8 @@ tool_dispatcher = "xml"
             matrix: Some(MatrixConfig {
                 homeserver: "https://m.org".into(),
                 access_token: "tok".into(),
+                user_id: None,
+                device_id: None,
                 room_id: "!r:m".into(),
                 allowed_users: vec!["@u:m".into()],
             }),
@@ -2797,6 +3491,9 @@ channel_id = "C123"
             pair_rate_limit_per_minute: 12,
             webhook_rate_limit_per_minute: 80,
             idempotency_ttl_secs: 600,
+            rate_limit_max_keys: 0,
+            idempotency_max_keys: 0,
+            trust_forwarded_headers: false,
         };
         let toml_str = toml::to_string(&g).unwrap();
         let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();
