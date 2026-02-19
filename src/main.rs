@@ -34,13 +34,16 @@
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+use dialoguer::{Input, Password};
 #[allow(unused_imports)]
 use redclaw::cli::{print_banner, print_service_ready, print_service_start, print_shutdown};
-use tracing::Level;
+use serde::{Deserialize, Serialize};
+use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod agent;
 mod approval;
+mod auth;
 mod channels;
 mod rag {
     pub use redclaw::rag::*;
@@ -183,7 +186,10 @@ enum Commands {
     },
 
     /// Comprehensive system health check (config, providers, channels, memory, security, cost, policy)
-    Doctor,
+    Doctor {
+        #[command(subcommand)]
+        doctor_command: Option<DoctorCommands>,
+    },
 
     /// Show system status (full details)
     Status,
@@ -225,6 +231,12 @@ enum Commands {
     Migrate {
         #[command(subcommand)]
         migrate_command: MigrateCommands,
+    },
+
+    /// Manage provider subscription authentication profiles
+    Auth {
+        #[command(subcommand)]
+        auth_command: AuthCommands,
     },
 
     /// Discover and introspect USB hardware
@@ -300,6 +312,103 @@ enum ModelCommands {
         /// Force live refresh and ignore fresh cache
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthCommands {
+    /// Login with OpenAI Codex OAuth
+    Login {
+        /// Provider (`openai-codex`)
+        #[arg(long)]
+        provider: String,
+        /// Profile name (default: default)
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Use OAuth device-code flow
+        #[arg(long)]
+        device_code: bool,
+    },
+    /// Complete OAuth by pasting redirect URL or auth code
+    PasteRedirect {
+        /// Provider (`openai-codex`)
+        #[arg(long)]
+        provider: String,
+        /// Profile name (default: default)
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Full redirect URL or raw OAuth code
+        #[arg(long)]
+        input: Option<String>,
+    },
+    /// Paste setup token / auth token (for Anthropic subscription auth)
+    PasteToken {
+        /// Provider (`anthropic`)
+        #[arg(long)]
+        provider: String,
+        /// Profile name (default: default)
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Token value (if omitted, read interactively)
+        #[arg(long)]
+        token: Option<String>,
+        /// Auth kind override (`authorization` or `api-key`)
+        #[arg(long)]
+        auth_kind: Option<String>,
+    },
+    /// Alias for `paste-token` (interactive by default)
+    SetupToken {
+        /// Provider (`anthropic`)
+        #[arg(long)]
+        provider: String,
+        /// Profile name (default: default)
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// Refresh OpenAI Codex access token using refresh token
+    Refresh {
+        /// Provider (`openai-codex`)
+        #[arg(long)]
+        provider: String,
+        /// Profile name or profile id
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Remove auth profile
+    Logout {
+        /// Provider
+        #[arg(long)]
+        provider: String,
+        /// Profile name (default: default)
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// Set active profile for a provider
+    Use {
+        /// Provider
+        #[arg(long)]
+        provider: String,
+        /// Profile name or full profile id
+        #[arg(long)]
+        profile: String,
+    },
+    /// List auth profiles
+    List,
+    /// Show auth status with active profile and token expiry info
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum DoctorCommands {
+    /// Probe model catalogs across providers and report availability
+    Models {
+        /// Probe a specific provider only (default: all known providers)
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Prefer cached catalogs when available (skip forced live refresh)
+        #[arg(long)]
+        use_cache: bool,
     },
 }
 
@@ -473,6 +582,10 @@ async fn main() -> Result<()> {
             eprintln!("Observability: {}", config.observability.backend);
             eprintln!("Autonomy:      {:?}", config.autonomy.level);
             eprintln!("Runtime:       {}", config.runtime.kind);
+            let effective_memory_backend = memory::effective_memory_backend_name(
+                &config.memory.backend,
+                Some(&config.storage.provider.config),
+            );
             eprintln!(
                 "Heartbeat:    {}",
                 if config.heartbeat.enabled {
@@ -483,7 +596,7 @@ async fn main() -> Result<()> {
             );
             eprintln!(
                 "Memory:       {} (auto-save: {})",
-                config.memory.backend,
+                effective_memory_backend,
                 if config.memory.auto_save { "on" } else { "off" }
             );
 
@@ -548,7 +661,12 @@ async fn main() -> Result<()> {
 
         Commands::Models { model_command } => match model_command {
             ModelCommands::Refresh { provider, force } => {
-                onboard::run_models_refresh(&config, provider.as_deref(), force)
+                let config_for_refresh = config.clone();
+                tokio::task::spawn_blocking(move || {
+                    onboard::run_models_refresh(&config_for_refresh, provider.as_deref(), force)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("models refresh task failed: {e}"))?
             }
         },
 
@@ -588,15 +706,28 @@ async fn main() -> Result<()> {
 
         Commands::Service { service_command } => service::handle_command(&service_command, &config),
 
-        Commands::Doctor => {
-            let report = doctor::run_diagnostics(&config);
-            println!("{report}");
-            if report.overall == doctor::HealthStatus::Healthy {
-                Ok(())
-            } else {
-                std::process::exit(1);
+        Commands::Doctor { doctor_command } => match doctor_command {
+            Some(DoctorCommands::Models {
+                provider,
+                use_cache,
+            }) => {
+                let config_for_models = config.clone();
+                tokio::task::spawn_blocking(move || {
+                    onboard::run_models_refresh(&config_for_models, provider.as_deref(), !use_cache)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("doctor models task failed: {e}"))?
             }
-        }
+            None => {
+                let report = doctor::run_diagnostics(&config);
+                println!("{report}");
+                if report.overall == doctor::HealthStatus::Healthy {
+                    Ok(())
+                } else {
+                    std::process::exit(1);
+                }
+            }
+        },
 
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => channels::start_channels(config).await,
@@ -616,12 +747,451 @@ async fn main() -> Result<()> {
             migration::handle_command(migrate_command, &config).await
         }
 
+        Commands::Auth { auth_command } => handle_auth_command(auth_command, &config).await,
+
         Commands::Hardware { hardware_command } => {
             hardware::handle_command(hardware_command.clone(), &config)
         }
 
         Commands::Peripheral { peripheral_command } => {
             peripherals::handle_command(peripheral_command.clone(), &config)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingOpenAiLogin {
+    profile: String,
+    code_verifier: String,
+    state: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingOpenAiLoginFile {
+    profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_verifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encrypted_code_verifier: Option<String>,
+    state: String,
+    created_at: String,
+}
+
+fn pending_openai_login_path(config: &Config) -> std::path::PathBuf {
+    auth::state_dir_from_config(config).join("auth-openai-pending.json")
+}
+
+fn pending_openai_secret_store(config: &Config) -> security::secrets::SecretStore {
+    security::secrets::SecretStore::new(
+        &auth::state_dir_from_config(config),
+        config.secrets.encrypt,
+    )
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+fn save_pending_openai_login(config: &Config, pending: &PendingOpenAiLogin) -> Result<()> {
+    let path = pending_openai_login_path(config);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let secret_store = pending_openai_secret_store(config);
+    let encrypted_code_verifier = secret_store.encrypt(&pending.code_verifier)?;
+    let persisted = PendingOpenAiLoginFile {
+        profile: pending.profile.clone(),
+        code_verifier: None,
+        encrypted_code_verifier: Some(encrypted_code_verifier),
+        state: pending.state.clone(),
+        created_at: pending.created_at.clone(),
+    };
+
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let json = serde_json::to_vec_pretty(&persisted)?;
+    std::fs::write(&tmp, json)?;
+    set_owner_only_permissions(&tmp)?;
+    std::fs::rename(tmp, &path)?;
+    set_owner_only_permissions(&path)?;
+    Ok(())
+}
+
+fn load_pending_openai_login(config: &Config) -> Result<Option<PendingOpenAiLogin>> {
+    let path = pending_openai_login_path(config);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    let persisted: PendingOpenAiLoginFile = serde_json::from_slice(&bytes)?;
+    let secret_store = pending_openai_secret_store(config);
+    let code_verifier = if let Some(encrypted) = persisted.encrypted_code_verifier {
+        secret_store.decrypt(&encrypted)?
+    } else if let Some(plaintext) = persisted.code_verifier {
+        plaintext
+    } else {
+        bail!("Pending OpenAI login is missing code verifier");
+    };
+
+    Ok(Some(PendingOpenAiLogin {
+        profile: persisted.profile,
+        code_verifier,
+        state: persisted.state,
+        created_at: persisted.created_at,
+    }))
+}
+
+fn clear_pending_openai_login(config: &Config) {
+    let path = pending_openai_login_path(config);
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+        let _ = file.set_len(0);
+        let _ = file.sync_all();
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+fn read_auth_input(prompt: &str) -> Result<String> {
+    let input = Password::new()
+        .with_prompt(prompt)
+        .allow_empty_password(false)
+        .interact()?;
+    Ok(input.trim().to_string())
+}
+
+fn read_plain_input(prompt: &str) -> Result<String> {
+    let input: String = Input::new().with_prompt(prompt).interact_text()?;
+    Ok(input.trim().to_string())
+}
+
+fn extract_openai_account_id_for_profile(access_token: &str) -> Option<String> {
+    let account_id = auth::openai_oauth::extract_account_id_from_jwt(access_token);
+    if account_id.is_none() {
+        warn!(
+            "Could not extract OpenAI account id from OAuth access token; requests may fail until re-authentication."
+        );
+    }
+    account_id
+}
+
+fn format_expiry(profile: &auth::profiles::AuthProfile) -> String {
+    match profile
+        .token_set
+        .as_ref()
+        .and_then(|token_set| token_set.expires_at)
+    {
+        Some(ts) => {
+            let now = chrono::Utc::now();
+            if ts <= now {
+                format!("expired at {}", ts.to_rfc3339())
+            } else {
+                let mins = (ts - now).num_minutes();
+                format!("expires in {mins}m ({})", ts.to_rfc3339())
+            }
+        }
+        None => "n/a".to_string(),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Result<()> {
+    let auth_service = auth::AuthService::from_config(config);
+
+    match auth_command {
+        AuthCommands::Login {
+            provider,
+            profile,
+            device_code,
+        } => {
+            let provider = auth::normalize_provider(&provider)?;
+            if provider != "openai-codex" {
+                bail!("`auth login` currently supports only --provider openai-codex");
+            }
+
+            let client = reqwest::Client::new();
+
+            if device_code {
+                match auth::openai_oauth::start_device_code_flow(&client).await {
+                    Ok(device) => {
+                        println!("OpenAI device-code login started.");
+                        println!("Visit: {}", device.verification_uri);
+                        println!("Code:  {}", device.user_code);
+                        if let Some(uri_complete) = &device.verification_uri_complete {
+                            println!("Fast link: {uri_complete}");
+                        }
+                        if let Some(message) = &device.message {
+                            println!("{message}");
+                        }
+
+                        let token_set =
+                            auth::openai_oauth::poll_device_code_tokens(&client, &device).await?;
+                        let account_id =
+                            extract_openai_account_id_for_profile(&token_set.access_token);
+
+                        auth_service.store_openai_tokens(&profile, token_set, account_id, true)?;
+                        clear_pending_openai_login(config);
+
+                        println!("Saved profile {profile}");
+                        println!("Active profile for openai-codex: {profile}");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        println!(
+                            "Device-code flow unavailable: {e}. Falling back to browser/paste flow."
+                        );
+                    }
+                }
+            }
+
+            let pkce = auth::openai_oauth::generate_pkce_state();
+            let pending = PendingOpenAiLogin {
+                profile: profile.clone(),
+                code_verifier: pkce.code_verifier.clone(),
+                state: pkce.state.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            save_pending_openai_login(config, &pending)?;
+
+            let authorize_url = auth::openai_oauth::build_authorize_url(&pkce);
+            println!("Open this URL in your browser and authorize access:");
+            println!("{authorize_url}");
+            println!();
+            println!("Waiting for callback at http://localhost:1455/auth/callback ...");
+
+            let code = match auth::openai_oauth::receive_loopback_code(
+                &pkce.state,
+                std::time::Duration::from_secs(180),
+            )
+            .await
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    println!("Callback capture failed: {e}");
+                    println!(
+                        "Run `redclaw auth paste-redirect --provider openai-codex --profile {profile}`"
+                    );
+                    return Ok(());
+                }
+            };
+
+            let token_set =
+                auth::openai_oauth::exchange_code_for_tokens(&client, &code, &pkce).await?;
+            let account_id = extract_openai_account_id_for_profile(&token_set.access_token);
+
+            auth_service.store_openai_tokens(&profile, token_set, account_id, true)?;
+            clear_pending_openai_login(config);
+
+            println!("Saved profile {profile}");
+            println!("Active profile for openai-codex: {profile}");
+            Ok(())
+        }
+
+        AuthCommands::PasteRedirect {
+            provider,
+            profile,
+            input,
+        } => {
+            let provider = auth::normalize_provider(&provider)?;
+            if provider != "openai-codex" {
+                bail!("`auth paste-redirect` currently supports only --provider openai-codex");
+            }
+
+            let pending = load_pending_openai_login(config)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No pending OpenAI login found. Run `redclaw auth login --provider openai-codex` first."
+                )
+            })?;
+
+            if pending.profile != profile {
+                bail!(
+                    "Pending login profile mismatch: pending={}, requested={}",
+                    pending.profile,
+                    profile
+                );
+            }
+
+            let redirect_input = match input {
+                Some(value) => value,
+                None => read_plain_input("Paste redirect URL or OAuth code")?,
+            };
+
+            let code = auth::openai_oauth::parse_code_from_redirect(
+                &redirect_input,
+                Some(&pending.state),
+            )?;
+
+            let pkce = auth::openai_oauth::PkceState {
+                code_verifier: pending.code_verifier.clone(),
+                code_challenge: String::new(),
+                state: pending.state.clone(),
+            };
+
+            let client = reqwest::Client::new();
+            let token_set =
+                auth::openai_oauth::exchange_code_for_tokens(&client, &code, &pkce).await?;
+            let account_id = extract_openai_account_id_for_profile(&token_set.access_token);
+
+            auth_service.store_openai_tokens(&profile, token_set, account_id, true)?;
+            clear_pending_openai_login(config);
+
+            println!("Saved profile {profile}");
+            println!("Active profile for openai-codex: {profile}");
+            Ok(())
+        }
+
+        AuthCommands::PasteToken {
+            provider,
+            profile,
+            token,
+            auth_kind,
+        } => {
+            let provider = auth::normalize_provider(&provider)?;
+            let token = match token {
+                Some(token) => token.trim().to_string(),
+                None => read_auth_input("Paste token")?,
+            };
+            if token.is_empty() {
+                bail!("Token cannot be empty");
+            }
+
+            let kind = auth::anthropic_token::detect_auth_kind(&token, auth_kind.as_deref());
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert(
+                "auth_kind".to_string(),
+                kind.as_metadata_value().to_string(),
+            );
+
+            auth_service.store_provider_token(&provider, &profile, &token, metadata, true)?;
+            println!("Saved profile {profile}");
+            println!("Active profile for {provider}: {profile}");
+            Ok(())
+        }
+
+        AuthCommands::SetupToken { provider, profile } => {
+            let provider = auth::normalize_provider(&provider)?;
+            let token = read_auth_input("Paste token")?;
+            if token.is_empty() {
+                bail!("Token cannot be empty");
+            }
+
+            let kind = auth::anthropic_token::detect_auth_kind(&token, Some("authorization"));
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert(
+                "auth_kind".to_string(),
+                kind.as_metadata_value().to_string(),
+            );
+
+            auth_service.store_provider_token(&provider, &profile, &token, metadata, true)?;
+            println!("Saved profile {profile}");
+            println!("Active profile for {provider}: {profile}");
+            Ok(())
+        }
+
+        AuthCommands::Refresh { provider, profile } => {
+            let provider = auth::normalize_provider(&provider)?;
+            if provider != "openai-codex" {
+                bail!("`auth refresh` currently supports only --provider openai-codex");
+            }
+
+            match auth_service
+                .get_valid_openai_access_token(profile.as_deref())
+                .await?
+            {
+                Some(_) => {
+                    println!("OpenAI Codex token is valid (refresh completed if needed).");
+                    Ok(())
+                }
+                None => {
+                    bail!(
+                        "No OpenAI Codex auth profile found. Run `redclaw auth login --provider openai-codex`."
+                    )
+                }
+            }
+        }
+
+        AuthCommands::Logout { provider, profile } => {
+            let provider = auth::normalize_provider(&provider)?;
+            let removed = auth_service.remove_profile(&provider, &profile)?;
+            if removed {
+                println!("Removed auth profile {provider}:{profile}");
+            } else {
+                println!("Auth profile not found: {provider}:{profile}");
+            }
+            Ok(())
+        }
+
+        AuthCommands::Use { provider, profile } => {
+            let provider = auth::normalize_provider(&provider)?;
+            auth_service.set_active_profile(&provider, &profile)?;
+            println!("Active profile for {provider}: {profile}");
+            Ok(())
+        }
+
+        AuthCommands::List => {
+            let data = auth_service.load_profiles()?;
+            if data.profiles.is_empty() {
+                println!("No auth profiles configured.");
+                return Ok(());
+            }
+
+            for (id, profile) in &data.profiles {
+                let active = data
+                    .active_profiles
+                    .get(&profile.provider)
+                    .is_some_and(|active_id| active_id == id);
+                let marker = if active { "*" } else { " " };
+                println!("{marker} {id}");
+            }
+
+            Ok(())
+        }
+
+        AuthCommands::Status => {
+            let data = auth_service.load_profiles()?;
+            if data.profiles.is_empty() {
+                println!("No auth profiles configured.");
+                return Ok(());
+            }
+
+            for (id, profile) in &data.profiles {
+                let active = data
+                    .active_profiles
+                    .get(&profile.provider)
+                    .is_some_and(|active_id| active_id == id);
+                let marker = if active { "*" } else { " " };
+                println!(
+                    "{} {} kind={:?} account={} expires={}",
+                    marker,
+                    id,
+                    profile.kind,
+                    crate::security::redact(profile.account_id.as_deref().unwrap_or("unknown")),
+                    format_expiry(profile)
+                );
+            }
+
+            println!();
+            println!("Active profiles:");
+            for (provider, profile_id) in &data.active_profiles {
+                println!("  {provider}: {profile_id}");
+            }
+
+            Ok(())
         }
     }
 }
