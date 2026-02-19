@@ -637,12 +637,14 @@ pub fn create_provider(name: &str, api_key: Option<&str>) -> anyhow::Result<Box<
                 AuthStyle::Bearer,
             )))
         }
-        name if minimax_base_url(name).is_some() => Ok(Box::new(OpenAiCompatibleProvider::new(
-            "MiniMax",
-            minimax_base_url(name).expect("checked in guard"),
-            key,
-            AuthStyle::Bearer,
-        ))),
+        name if minimax_base_url(name).is_some() => Ok(Box::new(
+            OpenAiCompatibleProvider::new_merge_system_into_user(
+                "MiniMax",
+                minimax_base_url(name).expect("checked in guard"),
+                key,
+                AuthStyle::Bearer,
+            )
+        )),
         "bedrock" | "aws-bedrock" => Ok(Box::new(OpenAiCompatibleProvider::new(
             "Amazon Bedrock",
             "https://bedrock-runtime.us-east-1.amazonaws.com",
