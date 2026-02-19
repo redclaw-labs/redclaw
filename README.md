@@ -5,10 +5,11 @@
   <p><strong>Battle-hardened AI agent runtime. Built in Rust.</strong></p>
 
   <!-- Badges row -->
+  [![CI](https://github.com/redclaw-labs/redclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/redclaw-labs/redclaw/actions/workflows/ci.yml)
   [![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
-  [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+  [![Rust](https://img.shields.io/badge/Rust-1.92%2B-orange.svg)](https://www.rust-lang.org/)
   [![Version](https://img.shields.io/badge/version-1.0.0-crimson.svg)](CHANGELOG.md)
-  [![Tests](https://img.shields.io/badge/tests-1500%2B-green.svg)](RUN_TESTS.md)
+  [![Tests](https://img.shields.io/badge/tests-3000%2B-green.svg)](RUN_TESTS.md)
   [![Providers](https://img.shields.io/badge/providers-30%2B-blue.svg)](#providers)
   [![Channels](https://img.shields.io/badge/channels-14-purple.svg)](#channels)
 </div>
@@ -206,7 +207,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 - [GitHub Discussions](https://github.com/redclaw-labs/redclaw/discussions)
 
 ```bash
-cargo test               # 1,017 tests
+cargo test               # 3,000+ tests (actual: 3,041)
 cargo clippy             # Lint (0 warnings)
 cargo fmt                # Format
 
