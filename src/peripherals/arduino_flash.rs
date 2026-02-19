@@ -38,27 +38,35 @@ pub fn ensure_arduino_cli() -> Result<()> {
             anyhow::bail!("brew install arduino-cli failed. Install manually: https://arduino.github.io/arduino-cli/");
         }
         println!("arduino-cli installed.");
+
+        if !arduino_cli_available() {
+            anyhow::bail!("arduino-cli still not found after install. Ensure it's in PATH.");
+        }
+
+        return Ok(());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     {
-        println!("arduino-cli not found. Run the install script:");
-        println!("  curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh");
-        println!();
-        println!("Or install via package manager (e.g. apt install arduino-cli on Debian/Ubuntu).");
-        anyhow::bail!("arduino-cli not installed. Install it and try again.");
-    }
+        #[cfg(target_os = "linux")]
+        {
+            println!("arduino-cli not found. Run the install script:");
+            println!(
+                "  curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh"
+            );
+            println!();
+            println!(
+                "Or install via package manager (e.g. apt install arduino-cli on Debian/Ubuntu)."
+            );
+            anyhow::bail!("arduino-cli not installed. Install it and try again.");
+        }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        println!("arduino-cli not found. Install it: https://arduino.github.io/arduino-cli/");
-        anyhow::bail!("arduino-cli not installed.");
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("arduino-cli not found. Install it: https://arduino.github.io/arduino-cli/");
+            anyhow::bail!("arduino-cli not installed.");
+        }
     }
-
-    if !arduino_cli_available() {
-        anyhow::bail!("arduino-cli still not found after install. Ensure it's in PATH.");
-    }
-    Ok(())
 }
 
 /// Ensure arduino:avr core is installed.
