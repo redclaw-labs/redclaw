@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 pub struct OllamaProvider {
     base_url: String,
     api_key: Option<String>,
-    client: Client,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,11 +50,6 @@ impl OllamaProvider {
                 .trim_end_matches('/')
                 .to_string(),
             api_key,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(300)) // Ollama runs locally, may be slow
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
         }
     }
 
@@ -64,6 +58,10 @@ impl OllamaProvider {
             .ok()
             .and_then(|url| url.host_str().map(|host| host.to_string()))
             .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+    }
+
+    fn http_client(&self) -> Client {
+        crate::config::build_runtime_proxy_client_with_timeouts("provider.ollama", 300, 10)
     }
 
     fn resolve_request_details(&self, model: &str) -> anyhow::Result<(String, bool)> {
@@ -104,7 +102,7 @@ impl OllamaProvider {
 
         let url = format!("{}/api/chat", self.base_url);
 
-        let mut request_builder = self.client.post(&url).json(&request);
+        let mut request_builder = self.http_client().post(&url).json(&request);
         if should_auth {
             if let Some(key) = self.api_key.as_ref() {
                 request_builder = request_builder.bearer_auth(key);

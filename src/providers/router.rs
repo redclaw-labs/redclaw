@@ -382,4 +382,78 @@ mod tests {
         assert_eq!(result, "response");
         assert_eq!(mock.call_count(), 1);
     }
+
+    #[tokio::test]
+    async fn chat_with_tools_delegates_to_resolved_provider() {
+        let mock = Arc::new(MockProvider::new("tool-response"));
+        let router = RouterProvider::new(
+            vec![(
+                "default".into(),
+                Box::new(Arc::clone(&mock)) as Box<dyn Provider>,
+            )],
+            vec![],
+            "model".into(),
+        );
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "use tools".to_string(),
+        }];
+        let tools = vec![crate::tools::ToolSpec {
+            name: "shell".to_string(),
+            description: "Run shell command".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        // RouterProvider should delegate chat() (including tool-aware request) through to the mock.
+        // MockProvider uses the default Provider::chat implementation.
+        let result = router
+            .chat(
+                ChatRequest {
+                    messages: &messages,
+                    tools: Some(&tools),
+                },
+                "model",
+                0.7,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.text.as_deref(), Some("tool-response"));
+        assert_eq!(mock.call_count(), 1);
+        assert_eq!(mock.last_model(), "model");
+    }
+
+    #[tokio::test]
+    async fn chat_with_tools_routes_hint_correctly() {
+        let (router, mocks) = make_router(
+            vec![("fast", "fast-tool"), ("smart", "smart-tool")],
+            vec![("reasoning", "smart", "claude-opus")],
+        );
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "reason about this".to_string(),
+        }];
+        let tools = vec![crate::tools::ToolSpec {
+            name: "test".to_string(),
+            description: "test".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let result = router
+            .chat(
+                ChatRequest {
+                    messages: &messages,
+                    tools: Some(&tools),
+                },
+                "hint:reasoning",
+                0.5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.text.as_deref(), Some("smart-tool"));
+        assert_eq!(mocks[1].call_count(), 1);
+        assert_eq!(mocks[1].last_model(), "claude-opus");
+        assert_eq!(mocks[0].call_count(), 0);
+    }
 }
