@@ -1086,6 +1086,12 @@ fn check_memory(config: &Config) -> Vec<CheckResult> {
                 None,
             )
         }
+        MemoryBackendKind::Postgres => check_result(
+            "memory.backend",
+            HealthStatus::Healthy,
+            format!("memory backend recognized: {backend_raw}"),
+            None,
+        ),
         MemoryBackendKind::None => check_result(
             "memory.backend",
             HealthStatus::Warning,
@@ -1827,6 +1833,9 @@ mod tests {
         config.channels_config.telegram = Some(TelegramConfig {
             bot_token: "tg-token".to_string(),
             allowed_users: vec!["*".to_string()],
+            stream_mode: crate::config::StreamMode::default(),
+            draft_update_interval_ms: 1000,
+            mention_only: false,
         });
 
         // Cost: set a real limit and a log path whose parent exists.

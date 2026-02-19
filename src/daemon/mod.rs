@@ -66,7 +66,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             max_backoff,
             move || {
                 let cfg = heartbeat_cfg.clone();
-                async move { run_heartbeat_worker(cfg).await }
+                Box::pin(run_heartbeat_worker(cfg))
             },
         ));
     }
@@ -292,6 +292,9 @@ mod tests {
         config.channels_config.telegram = Some(crate::config::TelegramConfig {
             bot_token: "token".into(),
             allowed_users: vec![],
+            stream_mode: crate::config::StreamMode::default(),
+            draft_update_interval_ms: 1000,
+            mention_only: false,
         });
         assert!(has_supervised_channels(&config));
     }
