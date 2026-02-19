@@ -8,5 +8,6 @@ firmware/*/target
 *.swp
 *.swo
 .wt-pr37/
+.worktrees/
 redclaw_setup_reports/
 

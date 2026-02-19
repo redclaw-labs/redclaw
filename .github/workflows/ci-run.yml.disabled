@@ -1,4 +1,4 @@
-name: CI
+name: CI Run
 
 on:
     push:
@@ -209,10 +209,55 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+          lint-feedback:
+            name: Lint Feedback
+            if: always() && github.event_name == 'pull_request'
+            needs: [changes, lint, docs-quality]
+            runs-on: ubuntu-24.04
+            permissions:
+              contents: read
+              issues: write
+              pull-requests: write
+            steps:
+              - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+              - name: Post lint feedback comment
+                uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+                env:
+                  RUST_CHANGED: ${{ needs.changes.outputs.rust_changed }}
+                  DOCS_CHANGED: ${{ needs.changes.outputs.docs_changed }}
+                  LINT_RESULT: ${{ needs.lint.result }}
+                  LINT_DELTA_RESULT: skipped
+                  DOCS_RESULT: ${{ needs.docs-quality.result }}
+                with:
+                  script: |
+                    const script = require('./.github/workflows/scripts/lint_feedback.js');
+                    await script({github, context, core});
+
+          workflow-owner-approval:
+            name: Workflow Owner Approval
+            if: github.event_name == 'pull_request'
+            runs-on: ubuntu-24.04
+            permissions:
+              contents: read
+              pull-requests: read
+            steps:
+              - name: Checkout repository
+                uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+              - name: Require owner approval for workflow file changes
+                uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+                env:
+                  WORKFLOW_OWNER_LOGINS: ${{ vars.WORKFLOW_OWNER_LOGINS }}
+                with:
+                  script: |
+                    const script = require('./.github/workflows/scripts/ci_workflow_owner_approval.js');
+                    await script({ github, context, core });
+
     ci-required:
         name: CI Required Gate
         if: always()
-        needs: [changes, lint, test, build, docs-only, non-rust, docs-quality]
+            needs: [changes, lint, test, build, docs-only, non-rust, docs-quality, workflow-owner-approval]
         runs-on: ubuntu-24.04
         steps:
             - name: Enforce required status
@@ -247,11 +292,18 @@ jobs:
                   lint_result="${{ needs.lint.result }}"
                   test_result="${{ needs.test.result }}"
                   build_result="${{ needs.build.result }}"
+                  workflow_owner_result="${{ needs.workflow-owner-approval.result }}"
 
                   echo "lint=${lint_result}"
                   echo "test=${test_result}"
                   echo "build=${build_result}"
                   echo "docs=${docs_result}"
+                  echo "workflow-owner-approval=${workflow_owner_result}"
+
+                  if [ "$workflow_owner_result" = "failure" ]; then
+                    echo "Workflow owner approval job failed."
+                    exit 1
+                  fi
 
                   if [ "$lint_result" != "success" ] || [ "$test_result" != "success" ] || [ "$build_result" != "success" ]; then
                     echo "Required CI jobs did not pass."
