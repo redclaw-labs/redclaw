@@ -3,10 +3,14 @@ use crate::cron::{due_jobs, reschedule_after_run, CronJob};
 use crate::security::SecurityPolicy;
 use anyhow::Result;
 use chrono::Utc;
+use futures_util::{stream, StreamExt};
+use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{self, Duration};
 
 const MIN_POLL_SECONDS: u64 = 5;
+const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
 
 pub async fn run(config: Config) -> Result<()> {
     if !config.scheduler.enabled {
@@ -19,8 +23,11 @@ pub async fn run(config: Config) -> Result<()> {
 
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
     let mut interval = time::interval(Duration::from_secs(poll_secs));
-    let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
     let max_concurrent = config.scheduler.max_concurrent.max(1);
+    let security = Arc::new(SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
 
     crate::health::mark_component_ok("scheduler");
 
@@ -36,20 +43,45 @@ pub async fn run(config: Config) -> Result<()> {
             }
         };
 
-        for job in jobs.into_iter().take(max_concurrent) {
-            crate::health::mark_component_ok("scheduler");
-            let (success, output) = execute_job_with_retry(&config, &security, &job).await;
+        process_due_jobs(&config, &security, jobs, max_concurrent).await;
+    }
+}
 
-            if !success {
-                crate::health::mark_component_error("scheduler", format!("job {} failed", job.id));
-            }
+async fn process_due_jobs(
+    config: &Config,
+    security: &Arc<SecurityPolicy>,
+    jobs: Vec<CronJob>,
+    max_concurrent: usize,
+) {
+    let mut in_flight = stream::iter(jobs.into_iter().map(|job| {
+        let config = config.clone();
+        let security = Arc::clone(security);
+        async move { execute_and_reschedule_job(&config, security.as_ref(), &job).await }
+    }))
+    .buffer_unordered(max_concurrent);
 
-            if let Err(e) = reschedule_after_run(&config, &job, success, &output) {
-                crate::health::mark_component_error("scheduler", e.to_string());
-                tracing::warn!("Failed to persist scheduler run result: {e}");
-            }
+    while let Some((job_id, success)) = in_flight.next().await {
+        if !success {
+            crate::health::mark_component_error("scheduler", format!("job {job_id} failed"));
         }
     }
+}
+
+async fn execute_and_reschedule_job(
+    config: &Config,
+    security: &SecurityPolicy,
+    job: &CronJob,
+) -> (String, bool) {
+    crate::health::mark_component_ok("scheduler");
+    let (success, output) = execute_job_with_retry(config, security, job).await;
+
+    if let Err(e) = reschedule_after_run(config, job, success, &output) {
+        crate::health::mark_component_error("scheduler", e.to_string());
+        tracing::warn!("Failed to persist scheduler run result: {e}");
+        return (job.id.clone(), false);
+    }
+
+    (job.id.clone(), success)
 }
 
 async fn execute_job_with_retry(
@@ -147,6 +179,21 @@ async fn run_job_command(
     security: &SecurityPolicy,
     job: &CronJob,
 ) -> (bool, String) {
+    run_job_command_with_timeout(
+        config,
+        security,
+        job,
+        Duration::from_secs(SHELL_JOB_TIMEOUT_SECS),
+    )
+    .await
+}
+
+async fn run_job_command_with_timeout(
+    config: &Config,
+    security: &SecurityPolicy,
+    job: &CronJob,
+    timeout: Duration,
+) -> (bool, String) {
     if !security.can_act() {
         return (
             false,
@@ -185,15 +232,22 @@ async fn run_job_command(
         );
     }
 
-    let output = Command::new("sh")
+    let child = match Command::new("sh")
         .arg("-lc")
         .arg(&job.command)
         .current_dir(&config.workspace_dir)
-        .output()
-        .await;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return (false, format!("spawn error: {e}")),
+    };
 
-    match output {
-        Ok(output) => {
+    match time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let combined = format!(
@@ -204,7 +258,11 @@ async fn run_job_command(
             );
             (output.status.success(), combined)
         }
-        Err(e) => (false, format!("spawn error: {e}")),
+        Ok(Err(e)) => (false, format!("spawn error: {e}")),
+        Err(_) => (
+            false,
+            format!("job timed out after {}s", timeout.as_secs_f64()),
+        ),
     }
 }
 
@@ -262,6 +320,20 @@ mod tests {
         assert!(!success);
         assert!(output.contains("definitely_missing_file_for_scheduler_test"));
         assert!(output.contains("status=exit status:"));
+    }
+
+    #[tokio::test]
+    async fn run_job_command_times_out() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp);
+        config.autonomy.allowed_commands = vec!["sleep".into()];
+        let job = test_job("sleep 1");
+        let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
+
+        let (success, output) =
+            run_job_command_with_timeout(&config, &security, &job, Duration::from_millis(50)).await;
+        assert!(!success);
+        assert!(output.contains("job timed out after"));
     }
 
     #[tokio::test]
