@@ -1,10 +1,11 @@
 use parking_lot::Mutex;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// How much autonomy the agent has
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AutonomyLevel {
     /// Read-only: can observe but not act
@@ -110,6 +111,7 @@ impl Default for SecurityPolicy {
                 "wc".into(),
                 "head".into(),
                 "tail".into(),
+                "date".into(),
             ],
             forbidden_paths: vec![
                 // System directories (blocked even when workspace_only=false)
@@ -649,6 +651,7 @@ mod tests {
         assert!(p.is_command_allowed("cargo build --release"));
         assert!(p.is_command_allowed("cat file.txt"));
         assert!(p.is_command_allowed("grep -r pattern ."));
+        assert!(p.is_command_allowed("date"));
     }
 
     #[test]
