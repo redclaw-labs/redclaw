@@ -1,4 +1,4 @@
-name: Release
+name: Pub Release
 
 on:
     push:
@@ -105,9 +105,11 @@ jobs:
             - name: Generate SBOM (CycloneDX)
               run: |
                   syft dir:. --source-name redclaw -o cyclonedx-json=artifacts/redclaw.cdx.json -o spdx-json=artifacts/redclaw.spdx.json
-                  echo "### SBOM Generated" >> "$GITHUB_STEP_SUMMARY"
-                  echo "- CycloneDX: redclaw.cdx.json" >> "$GITHUB_STEP_SUMMARY"
-                  echo "- SPDX: redclaw.spdx.json" >> "$GITHUB_STEP_SUMMARY"
+                  {
+                    echo "### SBOM Generated"
+                    echo "- CycloneDX: redclaw.cdx.json"
+                    echo "- SPDX: redclaw.spdx.json"
+                  } >> "$GITHUB_STEP_SUMMARY"
 
             - name: Generate SHA256 checksums
               run: |

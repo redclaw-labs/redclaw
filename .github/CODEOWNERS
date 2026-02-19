@@ -4,26 +4,26 @@
 # High-risk surfaces
 /src/security/** @redf0x1
 /src/runtime/** @redf0x1
-/src/memory/** @redf0x1 @chumyin
+/src/memory/** @redf0x1
 /.github/** @redf0x1
 /Cargo.toml @redf0x1
 /Cargo.lock @redf0x1
 
 # CI
-/.github/workflows/**  @redf0x1 @willsarg
-/.github/codeql/**     @willsarg
-/.github/dependabot.yml @willsarg
+/.github/workflows/**  @redf0x1
+/.github/codeql/**     @redf0x1
+/.github/dependabot.yml @redf0x1
 
 # Docs & governance
-/docs/**                @chumyin
-/AGENTS.md              @chumyin
-/CLAUDE.md              @chumyin
-/CONTRIBUTING.md        @chumyin
-/docs/pr-workflow.md    @chumyin
-/docs/reviewer-playbook.md @chumyin
-/docs/ci-map.md         @chumyin
+/docs/**                @redf0x1
+/AGENTS.md              @redf0x1
+/CLAUDE.md              @redf0x1
+/CONTRIBUTING.md        @redf0x1
+/docs/pr-workflow.md    @redf0x1
+/docs/reviewer-playbook.md @redf0x1
+/docs/ci-map.md         @redf0x1
 
 # Security / CI-CD governance overrides (last-match wins)
-/SECURITY.md              @willsarg
-/docs/actions-source-policy.md @willsarg
-/docs/ci-map.md           @willsarg
+/SECURITY.md              @redf0x1
+/docs/actions-source-policy.md @redf0x1
+/docs/ci-map.md           @redf0x1
