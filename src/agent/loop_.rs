@@ -5,7 +5,7 @@ use crate::errors::TOOL_PERMISSION_DENIED;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::policy::{PolicyAction, PolicyEngine};
-use crate::providers::{self, ChatMessage, Provider, ToolCall};
+use crate::providers::{self, ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::runtime;
 use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
@@ -17,8 +17,13 @@ use std::io::Write as _;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use uuid::Uuid;
-/// Maximum agentic tool-use iterations per user message to prevent runaway loops.
-const MAX_TOOL_ITERATIONS: usize = 10;
+
+/// Minimum characters per chunk when relaying LLM text to a streaming draft.
+const STREAM_CHUNK_MIN_CHARS: usize = 80;
+
+/// Default maximum agentic tool-use iterations per user message to prevent runaway loops.
+/// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
+const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 
 static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -63,8 +68,10 @@ fn scrub_credentials(input: &str) -> String {
         .to_string()
 }
 
-/// Trigger auto-compaction when non-system message count exceeds this threshold.
-const MAX_HISTORY_MESSAGES: usize = 50;
+/// Default trigger for auto-compaction when non-system message count exceeds this threshold.
+/// Prefer passing the config-driven value via `run_tool_call_loop`; this constant is only
+/// used when callers omit the parameter.
+const DEFAULT_MAX_HISTORY_MESSAGES: usize = 50;
 
 /// Keep this many most-recent non-system messages after compaction.
 const COMPACTION_KEEP_RECENT_MESSAGES: usize = 20;
@@ -95,7 +102,13 @@ fn autosave_memory_key(prefix: &str) -> String {
 
 /// Trim conversation history to prevent unbounded growth.
 /// Preserves the system prompt (first message if role=system) and the most recent messages.
-fn trim_history(history: &mut Vec<ChatMessage>) {
+fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize) {
+    let max_history = if max_history == 0 {
+        DEFAULT_MAX_HISTORY_MESSAGES
+    } else {
+        max_history
+    };
+
     // Nothing to trim if within limit
     let has_system = history.first().map_or(false, |m| m.role == "system");
     let non_system_count = if has_system {
@@ -104,12 +117,12 @@ fn trim_history(history: &mut Vec<ChatMessage>) {
         history.len()
     };
 
-    if non_system_count <= MAX_HISTORY_MESSAGES {
+    if non_system_count <= max_history {
         return;
     }
 
     let start = if has_system { 1 } else { 0 };
-    let to_remove = non_system_count - MAX_HISTORY_MESSAGES;
+    let to_remove = non_system_count - max_history;
     history.drain(start..start + to_remove);
 }
 
@@ -141,8 +154,15 @@ async fn auto_compact_history(
     history: &mut Vec<ChatMessage>,
     provider: &dyn Provider,
     model: &str,
+    max_history: usize,
     cost_tracker: Option<&CostTracker>,
 ) -> Result<bool> {
+    let max_history = if max_history == 0 {
+        DEFAULT_MAX_HISTORY_MESSAGES
+    } else {
+        max_history
+    };
+
     let has_system = history.first().map_or(false, |m| m.role == "system");
     let non_system_count = if has_system {
         history.len().saturating_sub(1)
@@ -150,7 +170,7 @@ async fn auto_compact_history(
         history.len()
     };
 
-    if non_system_count <= MAX_HISTORY_MESSAGES {
+    if non_system_count <= max_history {
         return Ok(false);
     }
 
@@ -252,15 +272,25 @@ async fn auto_compact_history(
     Ok(true)
 }
 
-/// Build context preamble by searching memory for relevant entries
-async fn build_context(mem: &dyn Memory, user_msg: &str) -> String {
+/// Build context preamble by searching memory for relevant entries.
+/// Entries with a hybrid score below `min_relevance_score` are dropped to
+/// prevent unrelated memories from bleeding into the conversation.
+async fn build_context(mem: &dyn Memory, user_msg: &str, min_relevance_score: f64) -> String {
     let mut context = String::new();
 
     // Pull relevant memories for this message
     if let Ok(entries) = mem.recall(user_msg, 5).await {
-        if !entries.is_empty() {
+        let relevant: Vec<_> = entries
+            .iter()
+            .filter(|e| match e.score {
+                Some(score) => score >= min_relevance_score,
+                None => true,
+            })
+            .collect();
+
+        if !relevant.is_empty() {
             context.push_str("[Memory context]\n");
-            for entry in &entries {
+            for entry in &relevant {
                 let _ = writeln!(context, "- {}: {}", entry.key, entry.content);
             }
             context.push('\n');
@@ -384,7 +414,7 @@ fn parse_tool_calls_from_json_value(value: &serde_json::Value) -> Vec<ParsedTool
     calls
 }
 
-const TOOL_CALL_OPEN_TAGS: [&str; 3] = ["<tool_call>", "<toolcall>", "<tool-call>"];
+const TOOL_CALL_OPEN_TAGS: [&str; 4] = ["<tool_call>", "<toolcall>", "<tool-call>", "<invoke>"];
 
 fn find_first_tag<'a>(haystack: &str, tags: &'a [&'a str]) -> Option<(usize, &'a str)> {
     tags.iter()
@@ -397,6 +427,7 @@ fn matching_tool_call_close_tag(open_tag: &str) -> Option<&'static str> {
         "<tool_call>" => Some("</tool_call>"),
         "<toolcall>" => Some("</toolcall>"),
         "<tool-call>" => Some("</tool-call>"),
+        "<invoke>" => Some("</invoke>"),
         _ => None,
     }
 }
@@ -542,6 +573,33 @@ fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
         .collect()
 }
 
+/// Build assistant history entry in JSON format for native tool-call APIs.
+/// Some providers reconstruct native tool call history from this serialized JSON.
+fn build_native_assistant_history(text: &str, tool_calls: &[ToolCall]) -> String {
+    let calls_json: Vec<serde_json::Value> = tool_calls
+        .iter()
+        .map(|tc| {
+            serde_json::json!({
+                "id": tc.id,
+                "name": tc.name,
+                "arguments": tc.arguments,
+            })
+        })
+        .collect();
+
+    let content = if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(text.trim().to_string())
+    };
+
+    serde_json::json!({
+        "content": content,
+        "tool_calls": calls_json,
+    })
+    .to_string()
+}
+
 fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) -> String {
     let mut parts = Vec::new();
 
@@ -586,6 +644,8 @@ pub(crate) async fn agent_turn(
     cost_tracker: Option<Arc<CostTracker>>,
     silent: bool,
     approval: Option<&ApprovalManager>,
+    max_tool_iterations: usize,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -600,6 +660,8 @@ pub(crate) async fn agent_turn(
         cost_tracker,
         silent,
         approval,
+        max_tool_iterations,
+        on_delta,
     )
     .await
 }
@@ -620,8 +682,20 @@ pub(crate) async fn run_tool_call_loop(
     cost_tracker: Option<Arc<CostTracker>>,
     silent: bool,
     approval: Option<&ApprovalManager>,
+    max_tool_iterations: usize,
+    on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
-    for _iteration in 0..MAX_TOOL_ITERATIONS {
+    let max_iterations = if max_tool_iterations == 0 {
+        DEFAULT_MAX_TOOL_ITERATIONS
+    } else {
+        max_tool_iterations
+    };
+
+    let tool_specs: Vec<crate::tools::ToolSpec> =
+        tools_registry.iter().map(|tool| tool.spec()).collect();
+    let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
+
+    for _iteration in 0..max_iterations {
         let estimated_prompt_tokens = cost_tracker
             .as_deref()
             .map(|_| estimate_input_tokens(history));
@@ -676,9 +750,22 @@ pub(crate) async fn run_tool_call_loop(
             messages_count: history.len(),
         });
 
+        let request_tools = if use_native_tools {
+            Some(tool_specs.as_slice())
+        } else {
+            None
+        };
+
         let llm_started_at = Instant::now();
         let response = match provider
-            .chat_with_history(history, model, temperature)
+            .chat(
+                ChatRequest {
+                    messages: history.as_slice(),
+                    tools: request_tools,
+                },
+                model,
+                temperature,
+            )
             .await
         {
             Ok(resp) => {
@@ -703,12 +790,17 @@ pub(crate) async fn run_tool_call_loop(
             }
         };
 
-        let response_text = response;
+        let response_text = response.text_or_empty().to_string();
 
         if let Some(tracker) = cost_tracker.as_deref() {
             let input_tokens =
                 estimated_prompt_tokens.unwrap_or_else(|| estimate_input_tokens(history));
-            let output_tokens = estimate_tokens(&response_text);
+            let mut output_tokens = estimate_tokens(&response_text);
+            for call in &response.tool_calls {
+                output_tokens = output_tokens
+                    .saturating_add(estimate_tokens(&call.name))
+                    .saturating_add(estimate_tokens(&call.arguments));
+            }
             let (input_price, output_price) = tracker.model_pricing_usd_per_million(model);
             let usage = TokenUsage::new(
                 model,
@@ -762,17 +854,50 @@ pub(crate) async fn run_tool_call_loop(
                 }
             }
         }
-        let assistant_history_content = response_text.clone();
-        let (parsed_text, tool_calls) = parse_tool_calls(&response_text);
+        let mut tool_calls = parse_structured_tool_calls(&response.tool_calls);
+        let mut parsed_text = String::new();
+        if tool_calls.is_empty() {
+            let (fallback_text, fallback_calls) = parse_tool_calls(&response_text);
+            if !fallback_text.is_empty() {
+                parsed_text = fallback_text;
+            }
+            tool_calls = fallback_calls;
+        }
+
+        let assistant_history_content = if response.tool_calls.is_empty() {
+            response_text.clone()
+        } else {
+            build_native_assistant_history(&response_text, &response.tool_calls)
+        };
+        let native_tool_calls = response.tool_calls;
+
+        let display_text = if parsed_text.is_empty() {
+            response_text.clone()
+        } else {
+            parsed_text.clone()
+        };
 
         if tool_calls.is_empty() {
-            // No tool calls — this is the final response
+            // No tool calls — this is the final response.
+            // If a streaming sender is provided, relay the text in small chunks
+            // so the channel can progressively update the draft message.
+            if let Some(ref tx) = on_delta {
+                let mut chunk = String::new();
+                for word in display_text.split_inclusive(char::is_whitespace) {
+                    chunk.push_str(word);
+                    if chunk.len() >= STREAM_CHUNK_MIN_CHARS
+                        && tx.send(std::mem::take(&mut chunk)).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                if !chunk.is_empty() {
+                    let _ = tx.send(chunk).await;
+                }
+            }
+
             history.push(ChatMessage::assistant(response_text.clone()));
-            return Ok(if parsed_text.is_empty() {
-                response_text
-            } else {
-                parsed_text
-            });
+            return Ok(display_text);
         }
 
         // Print any text the LLM produced alongside tool calls (unless silent)
@@ -781,8 +906,11 @@ pub(crate) async fn run_tool_call_loop(
             let _ = std::io::stdout().flush();
         }
 
-        // Execute each tool call and build results
+        // Execute each tool call and build results.
+        // `individual_results` tracks per-call output so that native-mode history
+        // can emit one `role: tool` message per tool call with the correct ID.
         let mut tool_results = String::new();
+        let mut individual_results: Vec<String> = Vec::new();
         for call in &tool_calls {
             // ── Approval hook ────────────────────────────────
             if let Some(mgr) = approval {
@@ -807,9 +935,11 @@ pub(crate) async fn run_tool_call_loop(
                     );
 
                     if decision == ApprovalResponse::No {
+                        let denied = "Denied by user.".to_string();
+                        individual_results.push(denied.clone());
                         let _ = writeln!(
                             tool_results,
-                            "<tool_result name=\"{}\">\nDenied by user.\n</tool_result>",
+                            "<tool_result name=\"{}\">\n{denied}\n</tool_result>",
                             call.name
                         );
                         continue;
@@ -926,6 +1056,8 @@ pub(crate) async fn run_tool_call_loop(
                 format!("Unknown tool: {}", call.name)
             };
 
+            individual_results.push(result.clone());
+
             let _ = writeln!(
                 tool_results,
                 "<tool_result name=\"{}\">\n{}\n</tool_result>",
@@ -933,12 +1065,24 @@ pub(crate) async fn run_tool_call_loop(
             );
         }
 
-        // Add assistant message with tool calls + tool results to history
+        // Add assistant message with tool calls + tool results to history.
+        // Native mode: emit one `role: tool` message per tool call with the correct ID.
+        // Prompt mode: use XML-based text format as before.
         history.push(ChatMessage::assistant(assistant_history_content.clone()));
-        history.push(ChatMessage::user(format!("[Tool results]\n{tool_results}")));
+        if native_tool_calls.is_empty() {
+            history.push(ChatMessage::user(format!("[Tool results]\n{tool_results}")));
+        } else {
+            for (native_call, result) in native_tool_calls.iter().zip(individual_results.iter()) {
+                let tool_msg = serde_json::json!({
+                    "tool_call_id": native_call.id,
+                    "content": result,
+                });
+                history.push(ChatMessage::tool(tool_msg.to_string()));
+            }
+        }
     }
 
-    anyhow::bail!("Agent exceeded maximum tool iterations ({MAX_TOOL_ITERATIONS})")
+    anyhow::bail!("Agent exceeded maximum tool iterations ({max_iterations})")
 }
 
 /// Build the tool instruction block for the system prompt so the LLM knows
@@ -1000,8 +1144,9 @@ pub async fn run(
     };
 
     // ── Memory (the brain) ────────────────────────────────────────
-    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory(
+    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
         &config.memory,
+        Some(&config.storage.provider.config),
         &config.workspace_dir,
         config.api_key.as_deref(),
     )?);
@@ -1219,7 +1364,8 @@ pub async fn run(
         }
 
         // Inject memory + hardware RAG context into user message
-        let mem_context = build_context(mem.as_ref(), &msg).await;
+        let mem_context =
+            build_context(mem.as_ref(), &msg, config.memory.min_relevance_score).await;
         let rag_limit = if config.agent.compact_context { 2 } else { 5 };
         let hw_context = hardware_rag
             .as_ref()
@@ -1250,6 +1396,8 @@ pub async fn run(
             cost_tracker.clone(),
             false,
             Some(&approval_manager),
+            config.agent.max_tool_iterations,
+            None,
         )
         .await?;
         println!("{response}");
@@ -1307,7 +1455,8 @@ pub async fn run(
             }
 
             // Inject memory + hardware RAG context into user message
-            let mem_context = build_context(mem.as_ref(), &user_input).await;
+            let mem_context =
+                build_context(mem.as_ref(), &user_input, config.memory.min_relevance_score).await;
             let rag_limit = if config.agent.compact_context { 2 } else { 5 };
             let hw_context = hardware_rag
                 .as_ref()
@@ -1335,6 +1484,8 @@ pub async fn run(
                 cost_tracker.clone(),
                 false,
                 Some(&approval_manager),
+                config.agent.max_tool_iterations,
+                None,
             )
             .await
             {
@@ -1359,6 +1510,7 @@ pub async fn run(
                 &mut history,
                 provider.as_ref(),
                 model_name,
+                config.agent.max_history_messages,
                 cost_tracker.as_deref(),
             )
             .await
@@ -1369,7 +1521,7 @@ pub async fn run(
             }
 
             // Hard cap as a safety net.
-            trim_history(&mut history);
+            trim_history(&mut history, config.agent.max_history_messages);
 
             if config.memory.auto_save {
                 let summary = truncate_with_ellipsis(&response, 100);
@@ -1383,8 +1535,11 @@ pub async fn run(
 
     let duration = start.elapsed();
     observer.record_event(&ObserverEvent::AgentEnd {
+        provider: provider_name.to_string(),
+        model: model_name.to_string(),
         duration,
         tokens_used: None,
+        cost_usd: None,
     });
 
     Ok(())
@@ -1409,8 +1564,9 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     } else {
         Some(PolicyEngine::new(config.policy.clone()))
     };
-    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory(
+    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
         &config.memory,
+        Some(&config.storage.provider.config),
         &config.workspace_dir,
         config.api_key.as_deref(),
     )?);
@@ -1536,7 +1692,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     );
     system_prompt.push_str(&build_tool_instructions(&tools_registry));
 
-    let mem_context = build_context(mem.as_ref(), message).await;
+    let mem_context = build_context(mem.as_ref(), message, config.memory.min_relevance_score).await;
     let rag_limit = if config.agent.compact_context { 2 } else { 5 };
     let hw_context = hardware_rag
         .as_ref()
@@ -1569,6 +1725,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         cost_tracker,
         true,
         Some(&approval_manager),
+        config.agent.max_tool_iterations,
+        None,
     )
     .await
 }
@@ -1816,22 +1974,25 @@ I will now call the tool with this payload:
     #[test]
     fn trim_history_preserves_system_prompt() {
         let mut history = vec![ChatMessage::system("system prompt")];
-        for i in 0..MAX_HISTORY_MESSAGES + 20 {
+        for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 20 {
             history.push(ChatMessage::user(format!("msg {i}")));
         }
         let original_len = history.len();
-        assert!(original_len > MAX_HISTORY_MESSAGES + 1);
+        assert!(original_len > DEFAULT_MAX_HISTORY_MESSAGES + 1);
 
-        trim_history(&mut history);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
 
         // System prompt preserved
         assert_eq!(history[0].role, "system");
         assert_eq!(history[0].content, "system prompt");
         // Trimmed to limit
-        assert_eq!(history.len(), MAX_HISTORY_MESSAGES + 1); // +1 for system
-                                                             // Most recent messages preserved
+        assert_eq!(history.len(), DEFAULT_MAX_HISTORY_MESSAGES + 1); // +1 for system
+                                                                     // Most recent messages preserved
         let last = &history[history.len() - 1];
-        assert_eq!(last.content, format!("msg {}", MAX_HISTORY_MESSAGES + 19));
+        assert_eq!(
+            last.content,
+            format!("msg {}", DEFAULT_MAX_HISTORY_MESSAGES + 19)
+        );
     }
 
     #[test]
@@ -1841,7 +2002,7 @@ I will now call the tool with this payload:
             ChatMessage::user("hello"),
             ChatMessage::assistant("hi"),
         ];
-        trim_history(&mut history);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
         assert_eq!(history.len(), 3);
     }
 
@@ -1965,22 +2126,22 @@ Done."#;
     fn trim_history_with_no_system_prompt() {
         // Recovery: History without system prompt should trim correctly
         let mut history = vec![];
-        for i in 0..MAX_HISTORY_MESSAGES + 20 {
+        for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 20 {
             history.push(ChatMessage::user(format!("msg {i}")));
         }
-        trim_history(&mut history);
-        assert_eq!(history.len(), MAX_HISTORY_MESSAGES);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
+        assert_eq!(history.len(), DEFAULT_MAX_HISTORY_MESSAGES);
     }
 
     #[test]
     fn trim_history_preserves_role_ordering() {
         // Recovery: After trimming, role ordering should remain consistent
         let mut history = vec![ChatMessage::system("system")];
-        for i in 0..MAX_HISTORY_MESSAGES + 10 {
+        for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 10 {
             history.push(ChatMessage::user(format!("user {i}")));
             history.push(ChatMessage::assistant(format!("assistant {i}")));
         }
-        trim_history(&mut history);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
         assert_eq!(history[0].role, "system");
         assert_eq!(history[history.len() - 1].role, "assistant");
     }
@@ -1989,7 +2150,7 @@ Done."#;
     fn trim_history_with_only_system_prompt() {
         // Recovery: Only system prompt should not be trimmed
         let mut history = vec![ChatMessage::system("system prompt")];
-        trim_history(&mut history);
+        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
         assert_eq!(history.len(), 1);
     }
 
@@ -2053,10 +2214,10 @@ Done."#;
     // ═══════════════════════════════════════════════════════════════════════
 
     const _: () = {
-        assert!(MAX_TOOL_ITERATIONS > 0);
-        assert!(MAX_TOOL_ITERATIONS <= 100);
-        assert!(MAX_HISTORY_MESSAGES > 0);
-        assert!(MAX_HISTORY_MESSAGES <= 1000);
+        assert!(DEFAULT_MAX_TOOL_ITERATIONS > 0);
+        assert!(DEFAULT_MAX_TOOL_ITERATIONS <= 100);
+        assert!(DEFAULT_MAX_HISTORY_MESSAGES > 0);
+        assert!(DEFAULT_MAX_HISTORY_MESSAGES <= 1000);
     };
 
     #[test]
