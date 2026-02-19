@@ -273,13 +273,15 @@ mod tests {
     use crate::security::SecurityPolicy;
     use tempfile::TempDir;
 
-    fn test_config(tmp: &TempDir) -> Config {
+    async fn test_config(tmp: &TempDir) -> Config {
         let config = Config {
             workspace_dir: tmp.path().join("workspace"),
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
         };
-        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        tokio::fs::create_dir_all(&config.workspace_dir)
+            .await
+            .unwrap();
         config
     }
 
@@ -299,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_success() {
         let tmp = TempDir::new().unwrap();
-        let config = test_config(&tmp);
+        let config = test_config(&tmp).await;
         let job = test_job("echo scheduler-ok");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
 
@@ -312,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_failure() {
         let tmp = TempDir::new().unwrap();
-        let config = test_config(&tmp);
+        let config = test_config(&tmp).await;
         let job = test_job("ls definitely_missing_file_for_scheduler_test");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
 
@@ -325,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_times_out() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.autonomy.allowed_commands = vec!["sleep".into()];
         let job = test_job("sleep 1");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
@@ -339,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_blocks_disallowed_command() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.autonomy.allowed_commands = vec!["echo".into()];
         let job = test_job("curl https://evil.example");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
@@ -353,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_blocks_forbidden_path_argument() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.autonomy.allowed_commands = vec!["cat".into()];
         let job = test_job("cat /etc/passwd");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
@@ -368,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_blocks_readonly_mode() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.autonomy.level = crate::security::AutonomyLevel::ReadOnly;
         let job = test_job("echo should-not-run");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
@@ -382,7 +384,7 @@ mod tests {
     #[tokio::test]
     async fn run_job_command_blocks_rate_limited() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.autonomy.max_actions_per_hour = 0;
         let job = test_job("echo should-not-run");
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
@@ -396,16 +398,17 @@ mod tests {
     #[tokio::test]
     async fn execute_job_with_retry_recovers_after_first_failure() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.reliability.scheduler_retries = 1;
         config.reliability.provider_backoff_ms = 1;
         config.autonomy.allowed_commands = vec!["sh".into()];
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
 
-        std::fs::write(
+        tokio::fs::write(
             config.workspace_dir.join("retry-once.sh"),
             "#!/bin/sh\nif [ -f retry-ok.flag ]; then\n  echo recovered\n  exit 0\nfi\ntouch retry-ok.flag\nexit 1\n",
         )
+        .await
         .unwrap();
         let job = test_job("sh ./retry-once.sh");
 
@@ -417,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn execute_job_with_retry_exhausts_attempts() {
         let tmp = TempDir::new().unwrap();
-        let mut config = test_config(&tmp);
+        let mut config = test_config(&tmp).await;
         config.reliability.scheduler_retries = 1;
         config.reliability.provider_backoff_ms = 1;
         let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);

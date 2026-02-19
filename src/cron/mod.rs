@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::security::SecurityPolicy;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -79,6 +80,40 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
         crate::CronCommands::Remove { id } => {
             remove_job(config, &id)?;
             println!("✅ Removed cron job {id}");
+            Ok(())
+        }
+        crate::CronCommands::Update {
+            id,
+            expression,
+            tz,
+            command,
+            name,
+        } => {
+            if expression.is_none() && tz.is_none() && command.is_none() && name.is_none() {
+                anyhow::bail!(
+                    "At least one of --expression, --tz, --command, or --name must be provided"
+                );
+            }
+
+            if tz.is_some() {
+                anyhow::bail!("Timezone updates (--tz) are not supported by this cron backend yet");
+            }
+            if name.is_some() {
+                anyhow::bail!("Job names (--name) are not supported by this cron backend yet");
+            }
+
+            if let Some(ref cmd) = command {
+                let security = SecurityPolicy::from_config(&config.autonomy, &config.workspace_dir);
+                if !security.is_command_allowed(cmd) {
+                    anyhow::bail!("Command blocked by security policy: {cmd}");
+                }
+            }
+
+            let job = update_job(config, &id, expression, command)?;
+            println!("✅ Updated cron job {}", job.id);
+            println!("  Expr: {}", job.expression);
+            println!("  Next: {}", job.next_run.to_rfc3339());
+            println!("  Cmd : {}", job.command);
             Ok(())
         }
         crate::CronCommands::Pause { id } => {
@@ -302,6 +337,48 @@ pub fn remove_job(config: &Config, id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn update_job(
+    config: &Config,
+    id: &str,
+    expression: Option<String>,
+    command: Option<String>,
+) -> Result<CronJob> {
+    let current =
+        get_job(config, id)?.ok_or_else(|| anyhow::anyhow!("Cron job '{id}' not found"))?;
+
+    let new_expression = expression.unwrap_or_else(|| current.expression.clone());
+    let new_command = command.unwrap_or_else(|| current.command.clone());
+
+    let next_run = if new_expression == current.expression {
+        current.next_run
+    } else {
+        next_run_for(&new_expression, Utc::now())?
+    };
+
+    let changed = with_connection(config, |conn| {
+        conn.execute(
+            "UPDATE cron_jobs SET expression = ?1, command = ?2, next_run = ?3 WHERE id = ?4",
+            params![new_expression, new_command, next_run.to_rfc3339(), id],
+        )
+        .context("Failed to update cron job")
+    })?;
+
+    if changed == 0 {
+        anyhow::bail!("Cron job '{id}' not found");
+    }
+
+    Ok(CronJob {
+        id: current.id,
+        expression: new_expression,
+        command: new_command,
+        next_run,
+        last_run: current.last_run,
+        last_status: current.last_status,
+        paused: current.paused,
+        one_shot: current.one_shot,
+    })
 }
 
 pub fn due_jobs(config: &Config, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
