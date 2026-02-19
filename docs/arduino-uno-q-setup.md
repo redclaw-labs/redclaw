@@ -118,7 +118,7 @@ nano ~/.redclaw/config.toml
 ```toml
 api_key = "YOUR_OPENROUTER_API_KEY"
 default_provider = "openrouter"
-default_model = "anthropic/claude-sonnet-4"
+default_model = "anthropic/claude-sonnet-4-6"
 
 [peripherals]
 enabled = false
@@ -130,7 +130,7 @@ allowed_users = ["*"]
 
 [gateway]
 host = "127.0.0.1"
-port = 8080
+port = 3000
 allow_public_bind = false
 
 [agent]
@@ -145,7 +145,7 @@ compact_context = true
 ssh arduino@<UNO_Q_IP>
 
 # Run daemon (Telegram polling works over WiFi)
-redclaw daemon --host 127.0.0.1 --port 8080
+redclaw daemon --host 127.0.0.1 --port 3000
 ```
 
 **At this point:** Telegram chat works. Send messages to your bot — RedClaw responds. No GPIO yet.
@@ -184,7 +184,7 @@ transport = "bridge"
 ### 5.3 Run RedClaw
 
 ```bash
-redclaw daemon --host 127.0.0.1 --port 8080
+redclaw daemon --host 127.0.0.1 --port 3000
 ```
 
 Now when you message your Telegram bot *"Turn on the LED"* or *"Set pin 13 high"*, RedClaw uses `gpio_write` via the Bridge.
@@ -203,7 +203,7 @@ Now when you message your Telegram bot *"Turn on the LED"* or *"Set pin 13 high"
 | 6 | `cargo build --release --no-default-features` |
 | 7 | `redclaw onboard --api-key KEY --provider openrouter` |
 | 8 | Edit `~/.redclaw/config.toml` (add Telegram bot_token) |
-| 9 | `redclaw daemon --host 127.0.0.1 --port 8080` |
+| 9 | `redclaw daemon --host 127.0.0.1 --port 3000` |
 | 10 | Message your Telegram bot — it responds |
 
 ---

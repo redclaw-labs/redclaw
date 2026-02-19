@@ -50,6 +50,9 @@ Battle-hardened AI agent runtime built in Rust. High performance, high security,
 - slack
 - telegram
 - whatsapp
+- **Telegram mention_only mode** — New config option `mention_only` for Telegram channel.
+	When enabled, bot only responds to messages that @-mention the bot in group chats.
+	Direct messages always work regardless of this setting. Default: `false`.
 - Unified `Channel` trait with `send`/`listen`/`health_check`
 - Per-channel allowlist and authentication
 - Typing indicators and message formatting

@@ -113,7 +113,7 @@ baud = 115200
 ## Phase 4: Run and Test
 
 ```bash
-redclaw daemon --host 127.0.0.1 --port 8080
+redclaw daemon --host 127.0.0.1 --port 3000
 ```
 
 Or use the agent directly:
@@ -131,7 +131,7 @@ Pin 13 = PA5 = User LED (LD2) on Nucleo-F401RE.
 | Step | Command |
 |------|---------|
 | 1 | Connect Nucleo via USB |
-| 2 | `cargo install probe-rs --locked` |
+| 2 | `cargo install probe-rs-tools --locked` |
 | 3 | `redclaw peripheral flash-nucleo` |
 | 4 | Add Nucleo to config.toml (path = your serial port) |
 | 5 | `redclaw daemon` or `redclaw agent -m "Turn on LED"` |
