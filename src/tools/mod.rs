@@ -13,10 +13,12 @@ pub mod image_info;
 pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
+pub mod proxy_config;
 pub mod schedule;
 pub mod screenshot;
 pub mod shell;
 pub mod traits;
+pub mod web_search_tool;
 
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
@@ -33,12 +35,14 @@ pub use image_info::ImageInfoTool;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
+pub use proxy_config::ProxyConfigTool;
 pub use schedule::ScheduleTool;
 pub use screenshot::ScreenshotTool;
 pub use shell::ShellTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ToolResult, ToolSpec};
+pub use web_search_tool::WebSearchTool;
 
 use crate::config::DelegateAgentConfig;
 use crate::memory::Memory;
@@ -108,14 +112,17 @@ pub fn all_tools_with_runtime(
     fallback_api_key: Option<&str>,
     config: &crate::config::Config,
 ) -> Vec<Box<dyn Tool>> {
+    let config_arc = Arc::new(config.clone());
+
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ShellTool::new(security.clone(), runtime)),
         Box::new(FileReadTool::new(security.clone())),
         Box::new(FileWriteTool::new(security.clone())),
-        Box::new(MemoryStoreTool::new(memory.clone())),
+        Box::new(MemoryStoreTool::new(memory.clone(), security.clone())),
         Box::new(MemoryRecallTool::new(memory.clone())),
-        Box::new(MemoryForgetTool::new(memory)),
+        Box::new(MemoryForgetTool::new(memory, security.clone())),
         Box::new(ScheduleTool::new(security.clone(), config.clone())),
+        Box::new(ProxyConfigTool::new(config_arc.clone(), security.clone())),
         Box::new(GitOperationsTool::new(
             security.clone(),
             workspace_dir.to_path_buf(),
@@ -158,13 +165,42 @@ pub fn all_tools_with_runtime(
         )));
     }
 
+    // Web search tool (env-configured; defaults to enabled with DuckDuckGo).
+    let web_search_enabled = std::env::var("WEB_SEARCH_ENABLED")
+        .ok()
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true);
+    if web_search_enabled {
+        let provider =
+            std::env::var("WEB_SEARCH_PROVIDER").unwrap_or_else(|_| "duckduckgo".to_string());
+        let brave_api_key = std::env::var("BRAVE_API_KEY").ok();
+        let max_results = std::env::var("WEB_SEARCH_MAX_RESULTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5);
+        let timeout_secs = std::env::var("WEB_SEARCH_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(15);
+        tools.push(Box::new(WebSearchTool::new(
+            provider,
+            brave_api_key,
+            max_results,
+            timeout_secs,
+        )));
+    }
+
     // Vision tools are always available
     tools.push(Box::new(ScreenshotTool::new(security.clone())));
     tools.push(Box::new(ImageInfoTool::new(security.clone())));
 
     if let Some(key) = composio_key {
         if !key.is_empty() {
-            tools.push(Box::new(ComposioTool::new(key, composio_entity_id)));
+            tools.push(Box::new(ComposioTool::new(
+                key,
+                composio_entity_id,
+                security.clone(),
+            )));
         }
     }
 
@@ -177,6 +213,7 @@ pub fn all_tools_with_runtime(
         tools.push(Box::new(DelegateTool::new(
             delegate_agents,
             fallback_api_key.map(String::from),
+            security.clone(),
         )));
     }
 
@@ -239,6 +276,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
         assert!(names.contains(&"schedule"));
+        assert!(names.contains(&"proxy_config"));
     }
 
     #[test]
@@ -275,6 +313,7 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"browser_open"));
+        assert!(names.contains(&"proxy_config"));
     }
 
     #[test]
@@ -413,6 +452,7 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"delegate"));
+        assert!(names.contains(&"proxy_config"));
     }
 
     #[test]
@@ -444,5 +484,6 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"delegate"));
+        assert!(names.contains(&"proxy_config"));
     }
 }
