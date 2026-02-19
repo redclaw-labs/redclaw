@@ -14,18 +14,23 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # 1. Copy manifests and toolchain pin to cache dependencies with the same compiler
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/robot-kit/Cargo.toml crates/robot-kit/Cargo.toml
 # Create dummy targets declared in Cargo.toml so manifest parsing succeeds.
-RUN mkdir -p src benches \
+RUN mkdir -p src benches crates/robot-kit/src \
     && echo "fn main() {}" > src/main.rs \
-    && echo "fn main() {}" > benches/agent_benchmarks.rs
+    && echo "fn main() {}" > benches/agent_benchmarks.rs \
+    && echo "pub fn placeholder() {}" > crates/robot-kit/src/lib.rs
 RUN --mount=type=cache,id=redclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=redclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=redclaw-target,target=/app/target,sharing=locked \
     cargo build --release --locked
-RUN rm -rf src benches
+RUN rm -rf src benches crates/robot-kit/src
 
-# 2. Copy source code
-COPY . .
+# 2. Copy only build-relevant source paths (avoid cache-busting on docs/tests/scripts)
+COPY src/ src/
+COPY benches/ benches/
+COPY crates/ crates/
+COPY firmware/ firmware/
 RUN --mount=type=cache,id=redclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=redclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=redclaw-target,target=/app/target,sharing=locked \
@@ -33,14 +38,10 @@ RUN --mount=type=cache,id=redclaw-cargo-registry,target=/usr/local/cargo/registr
     cp target/release/redclaw /app/redclaw && \
     strip /app/redclaw
 
-# ── Stage 2: Permissions & Config Prep ───────────────────────
-FROM busybox:1.37@sha256:b3255e7dfbcd10cb367af0d409747d511aeb66dfac98cf30e97e87e4207dd76f AS permissions
-# Create directory structure (simplified workspace path)
-RUN mkdir -p /redclaw-data/.redclaw /redclaw-data/workspace
-
-# Create minimal config for PRODUCTION (allows binding to public interfaces)
-# NOTE: Provider configuration must be done via environment variables at runtime
-RUN cat > /redclaw-data/.redclaw/config.toml <<EOF
+# Prepare runtime directory structure and default config inline (no extra stage)
+RUN mkdir -p /redclaw-data/.redclaw /redclaw-data/workspace && \
+    cat > /redclaw-data/.redclaw/config.toml <<EOF && \
+    chown -R 65534:65534 /redclaw-data
 workspace_dir = "/redclaw-data/workspace"
 config_path = "/redclaw-data/.redclaw/config.toml"
 api_key = ""
@@ -54,22 +55,16 @@ host = "[::]"
 allow_public_bind = true
 EOF
 
-RUN chown -R 65534:65534 /redclaw-data
-
-# ── Stage 3: Development Runtime (Debian) ────────────────────
+# ── Stage 2: Development Runtime (Debian) ────────────────────
 FROM debian:trixie-slim@sha256:f6e2cfac5cf956ea044b4bd75e6397b4372ad88fe00908045e9a0d21712ae3ba AS dev
 
-# Install runtime dependencies + basic debug tools
+# Install essential runtime dependencies only (use docker-compose.override.yml for dev tools)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    openssl \
     curl \
-    git \
-    iputils-ping \
-    vim \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=permissions /redclaw-data /redclaw-data
+COPY --from=builder /redclaw-data /redclaw-data
 COPY --from=builder /app/redclaw /usr/local/bin/redclaw
 
 # Overwrite minimal config with DEV template (Ollama defaults)
@@ -94,11 +89,11 @@ EXPOSE 3000
 ENTRYPOINT ["redclaw"]
 CMD ["gateway"]
 
-# ── Stage 4: Production Runtime (Distroless) ─────────────────
+# ── Stage 3: Production Runtime (Distroless) ─────────────────
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:84fcd3c223b144b0cb6edc5ecc75641819842a9679a3a58fd6294bec47532bf7 AS release
 
 COPY --from=builder /app/redclaw /usr/local/bin/redclaw
-COPY --from=permissions /redclaw-data /redclaw-data
+COPY --from=builder /redclaw-data /redclaw-data
 
 # Environment setup
 ENV REDCLAW_WORKSPACE=/redclaw-data/workspace
