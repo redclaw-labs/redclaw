@@ -5,6 +5,7 @@ use crate::providers::{is_glm_alias, is_zai_alias};
 use crate::security::AutonomyLevel;
 use anyhow::{Context, Result};
 use directories::UserDirs;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -48,7 +49,7 @@ static RUNTIME_PROXY_CLIENT_CACHE: OnceLock<RwLock<HashMap<String, reqwest::Clie
 
 // ── Top-level config ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
     /// Workspace directory - computed from home, not serialized
     #[serde(skip)]
@@ -148,7 +149,7 @@ pub struct Config {
 // ── Delegate Agents ──────────────────────────────────────────────
 
 /// Configuration for a delegate sub-agent used by the `delegate` tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DelegateAgentConfig {
     /// Provider name (e.g. "ollama", "openrouter", "anthropic")
     pub provider: String,
@@ -175,7 +176,7 @@ fn default_max_depth() -> u32 {
 // ── Hardware Config (wizard-driven) ─────────────────────────────
 
 /// Hardware transport mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 pub enum HardwareTransport {
     #[default]
     None,
@@ -196,7 +197,7 @@ impl std::fmt::Display for HardwareTransport {
 }
 
 /// Wizard-driven hardware configuration for physical world interaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HardwareConfig {
     /// Whether hardware access is enabled
     #[serde(default)]
@@ -242,7 +243,7 @@ impl Default for HardwareConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
     /// When true: bootstrap_max_chars=6000, rag_chunk_limit=2. Use for 13B or smaller models.
     #[serde(default)]
@@ -283,7 +284,7 @@ impl Default for AgentConfig {
 
 // ── Identity (AIEOS / OpenClaw format) ──────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IdentityConfig {
     /// Identity format: "openclaw" (default) or "aieos"
     #[serde(default = "default_identity_format")]
@@ -312,7 +313,7 @@ impl Default for IdentityConfig {
 
 // ── Cost tracking and budget enforcement ───────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CostConfig {
     /// Enable cost tracking (default: true)
     #[serde(default = "default_cost_enabled")]
@@ -363,7 +364,7 @@ pub struct CostConfig {
     pub prices: std::collections::HashMap<String, ModelPricing>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelPricing {
     /// Input price per 1M tokens
     #[serde(default)]
@@ -500,7 +501,7 @@ fn get_default_pricing() -> std::collections::HashMap<String, ModelPricing> {
 
 // ── Peripherals (hardware: STM32, RPi GPIO, etc.) ────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct PeripheralsConfig {
     /// Enable peripheral support (boards become agent tools)
     #[serde(default)]
@@ -514,7 +515,7 @@ pub struct PeripheralsConfig {
     pub datasheet_dir: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PeripheralBoardConfig {
     /// Board type: "nucleo-f401re", "rpi-gpio", "esp32", etc.
     pub board: String,
@@ -550,7 +551,7 @@ impl Default for PeripheralBoardConfig {
 
 // ── Gateway security ─────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GatewayConfig {
     /// Gateway port (default: 3000)
     #[serde(default = "default_gateway_port")]
@@ -638,7 +639,7 @@ impl Default for GatewayConfig {
 
 // ── Composio (managed tool surface) ─────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComposioConfig {
     /// Enable Composio integration for 1000+ OAuth tools
     #[serde(default)]
@@ -667,7 +668,7 @@ impl Default for ComposioConfig {
 
 // ── Secrets (encrypted credential store) ────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SecretsConfig {
     /// Enable encryption for API keys and tokens in config.toml
     #[serde(default = "default_true")]
@@ -682,7 +683,7 @@ impl Default for SecretsConfig {
 
 // ── Browser (friendly-service browsing only) ───────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserComputerUseConfig {
     /// Sidecar endpoint for computer-use actions (OS-level mouse/keyboard/screenshot)
     #[serde(default = "default_browser_computer_use_endpoint")]
@@ -729,7 +730,7 @@ impl Default for BrowserComputerUseConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BrowserConfig {
     /// Enable `browser_open` tool (opens URLs in Brave without scraping)
     #[serde(default)]
@@ -782,7 +783,7 @@ impl Default for BrowserConfig {
 
 // ── HTTP request tool ───────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct HttpRequestConfig {
     /// Enable `http_request` tool for API interactions
     #[serde(default)]
@@ -808,7 +809,7 @@ fn default_http_timeout_secs() -> u64 {
 
 // ── Web search ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WebSearchConfig {
     /// Enable `web_search_tool` for web searches
     #[serde(default = "default_true")]
@@ -853,7 +854,7 @@ impl Default for WebSearchConfig {
 
 // ── Proxy ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyScope {
     Environment,
@@ -862,7 +863,7 @@ pub enum ProxyScope {
     Services,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProxyConfig {
     /// Enable proxy support for selected scope.
     #[serde(default)]
@@ -1260,19 +1261,19 @@ pub fn build_runtime_proxy_client_with_timeouts(
 
 // ── Storage (optional provider override) ─────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct StorageConfig {
     #[serde(default)]
     pub provider: StorageProviderSection,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct StorageProviderSection {
     #[serde(default)]
     pub config: StorageProviderConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StorageProviderConfig {
     /// Storage engine key (e.g. "postgres", "sqlite").
     #[serde(default)]
@@ -1323,7 +1324,7 @@ impl Default for StorageProviderConfig {
 
 // ── Memory ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct MemoryConfig {
     /// "sqlite" | "lucid" | "postgres" | "markdown" | "none" (`none` = explicit no-op memory)
@@ -1473,7 +1474,7 @@ impl Default for MemoryConfig {
 
 // ── Observability ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ObservabilityConfig {
     /// "none" | "log" | "prometheus" | "otel"
     pub backend: String,
@@ -1499,7 +1500,7 @@ impl Default for ObservabilityConfig {
 
 // ── Autonomy / Security ──────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AutonomyConfig {
     pub level: AutonomyLevel,
     pub workspace_only: bool,
@@ -1584,7 +1585,7 @@ impl Default for AutonomyConfig {
 
 // ── Runtime ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeConfig {
     /// Runtime kind (`native` | `docker`).
     #[serde(default = "default_runtime_kind")]
@@ -1595,7 +1596,7 @@ pub struct RuntimeConfig {
     pub docker: DockerRuntimeConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DockerRuntimeConfig {
     /// Runtime image used to execute shell commands.
     #[serde(default = "default_docker_image")]
@@ -1671,7 +1672,7 @@ impl Default for RuntimeConfig {
 
 // ── Reliability / supervision ────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReliabilityConfig {
     /// Retries per provider before failing over.
     #[serde(default = "default_provider_retries")]
@@ -1746,7 +1747,7 @@ impl Default for ReliabilityConfig {
 
 // ── Scheduler ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SchedulerConfig {
     /// Enable the built-in scheduler loop.
     #[serde(default = "default_scheduler_enabled")]
@@ -1798,7 +1799,7 @@ impl Default for SchedulerConfig {
 /// ```
 ///
 /// Usage: pass `hint:reasoning` as the model parameter to route the request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelRouteConfig {
     /// Task hint name (e.g. "reasoning", "fast", "code", "summarize")
     pub hint: String,
@@ -1815,7 +1816,7 @@ pub struct ModelRouteConfig {
 
 /// Automatic query classification — classifies user messages by keyword/pattern
 /// and routes to the appropriate model hint. Disabled by default.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct QueryClassificationConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -1824,7 +1825,7 @@ pub struct QueryClassificationConfig {
 }
 
 /// A single classification rule mapping message patterns to a model hint.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct ClassificationRule {
     /// Must match a `[[model_routes]]` hint value.
     pub hint: String,
@@ -1847,7 +1848,7 @@ pub struct ClassificationRule {
 
 // ── Heartbeat ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HeartbeatConfig {
     pub enabled: bool,
     pub interval_minutes: u32,
@@ -1864,7 +1865,7 @@ impl Default for HeartbeatConfig {
 
 // ── Tunnel ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TunnelConfig {
     /// "none", "cloudflare", "tailscale", "ngrok", "custom"
     pub provider: String,
@@ -1894,13 +1895,13 @@ impl Default for TunnelConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CloudflareTunnelConfig {
     /// Cloudflare Tunnel token (from Zero Trust dashboard)
     pub token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TailscaleTunnelConfig {
     /// Use Tailscale Funnel (public internet) vs Serve (tailnet only)
     #[serde(default)]
@@ -1909,7 +1910,7 @@ pub struct TailscaleTunnelConfig {
     pub hostname: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NgrokTunnelConfig {
     /// ngrok auth token
     pub auth_token: String,
@@ -1917,7 +1918,7 @@ pub struct NgrokTunnelConfig {
     pub domain: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CustomTunnelConfig {
     /// Command template to start the tunnel. Use {port} and {host} placeholders.
     /// Example: "bore local {port} --to bore.pub"
@@ -1930,7 +1931,7 @@ pub struct CustomTunnelConfig {
 
 // ── Channels ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelsConfig {
     pub cli: bool,
     pub telegram: Option<TelegramConfig>,
@@ -1942,11 +1943,20 @@ pub struct ChannelsConfig {
     pub matrix: Option<MatrixConfig>,
     pub signal: Option<SignalConfig>,
     pub whatsapp: Option<WhatsAppConfig>,
+    pub linq: Option<LinqConfig>,
     pub email: Option<crate::channels::email_channel::EmailConfig>,
     pub irc: Option<IrcConfig>,
     pub lark: Option<LarkConfig>,
     pub dingtalk: Option<DingTalkConfig>,
     pub qq: Option<QqConfig>,
+    /// Timeout in seconds for processing a single channel message (LLM + tools).
+    /// Default: 300s for on-device LLMs (Ollama) which are slower than cloud APIs.
+    #[serde(default = "default_channel_message_timeout_secs")]
+    pub message_timeout_secs: u64,
+}
+
+fn default_channel_message_timeout_secs() -> u64 {
+    300
 }
 
 impl Default for ChannelsConfig {
@@ -1962,16 +1972,18 @@ impl Default for ChannelsConfig {
             matrix: None,
             signal: None,
             whatsapp: None,
+            linq: None,
             email: None,
             irc: None,
             lark: None,
             dingtalk: None,
             qq: None,
+            message_timeout_secs: default_channel_message_timeout_secs(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TelegramConfig {
     pub bot_token: String,
     #[serde(default)]
@@ -1996,7 +2008,7 @@ fn default_draft_update_interval_ms() -> u64 {
 }
 
 /// Streaming mode for channels that support incremental message updates.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamMode {
     #[default]
@@ -2004,7 +2016,7 @@ pub enum StreamMode {
     Partial,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DiscordConfig {
     pub bot_token: String,
     pub guild_id: Option<String>,
@@ -2016,7 +2028,7 @@ pub struct DiscordConfig {
     pub listen_to_bots: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SlackConfig {
     pub bot_token: String,
     pub app_token: Option<String>,
@@ -2025,7 +2037,7 @@ pub struct SlackConfig {
     pub allowed_users: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MattermostConfig {
     pub url: String,
     pub bot_token: String,
@@ -2042,18 +2054,18 @@ pub struct MattermostConfig {
     pub mention_only: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WebhookConfig {
     pub port: u16,
     pub secret: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IMessageConfig {
     pub allowed_contacts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MatrixConfig {
     pub homeserver: String,
     pub access_token: String,
@@ -2065,7 +2077,7 @@ pub struct MatrixConfig {
     pub allowed_users: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SignalConfig {
     /// Base URL for the signal-cli HTTP daemon (e.g. "http://127.0.0.1:8686").
     pub http_url: String,
@@ -2088,7 +2100,7 @@ pub struct SignalConfig {
     pub ignore_stories: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WhatsAppConfig {
     /// Access token from Meta Business Suite
     pub access_token: String,
@@ -2105,7 +2117,21 @@ pub struct WhatsAppConfig {
     pub allowed_numbers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LinqConfig {
+    /// Linq Partner API token (Bearer auth)
+    pub api_token: String,
+    /// Phone number to send from (E.164 format)
+    pub from_phone: String,
+    /// Webhook signing secret for signature verification
+    #[serde(default)]
+    pub signing_secret: Option<String>,
+    /// Allowed sender handles (phone numbers) or "*" for all
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IrcConfig {
     /// IRC server hostname
     pub server: String,
@@ -2138,7 +2164,7 @@ fn default_irc_port() -> u16 {
 
 /// Lark/Feishu configuration for messaging integration
 /// Lark is the international version, Feishu is the Chinese version
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LarkConfig {
     /// App ID from Lark/Feishu developer console
     pub app_id: String,
@@ -2161,7 +2187,7 @@ pub struct LarkConfig {
 // ── Security Config ─────────────────────────────────────────────────
 
 /// Security configuration for sandboxing, resource limits, and audit logging
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct SecurityConfig {
     /// Sandbox configuration
     #[serde(default)]
@@ -2177,7 +2203,7 @@ pub struct SecurityConfig {
 }
 
 /// Sandbox configuration for OS-level isolation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SandboxConfig {
     /// Enable sandboxing (None = auto-detect, Some = explicit)
     #[serde(default)]
@@ -2203,7 +2229,7 @@ impl Default for SandboxConfig {
 }
 
 /// Sandbox backend selection
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxBackend {
     /// Auto-detect best available (default)
@@ -2222,7 +2248,7 @@ pub enum SandboxBackend {
 }
 
 /// Resource limits for command execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceLimitsConfig {
     /// Maximum memory in MB per command
     #[serde(default = "default_max_memory_mb")]
@@ -2269,7 +2295,7 @@ impl Default for ResourceLimitsConfig {
 }
 
 /// Audit logging configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AuditConfig {
     /// Enable audit logging
     #[serde(default = "default_audit_enabled")]
@@ -2312,7 +2338,7 @@ impl Default for AuditConfig {
 }
 
 /// DingTalk configuration for Stream Mode messaging
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DingTalkConfig {
     /// Client ID (AppKey) from DingTalk developer console
     pub client_id: String,
@@ -2324,7 +2350,7 @@ pub struct DingTalkConfig {
 }
 
 /// Tencent QQ Official Bot configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QqConfig {
     /// QQ bot App ID
     pub app_id: String,
@@ -2775,6 +2801,38 @@ mod tests {
     }
 
     #[test]
+    fn config_schema_export_contains_expected_contract_shape() {
+        let schema = schemars::schema_for!(Config);
+        let schema_json = serde_json::to_value(&schema).expect("schema should serialize to json");
+
+        assert_eq!(
+            schema_json
+                .get("$schema")
+                .and_then(serde_json::Value::as_str),
+            Some("https://json-schema.org/draft/2020-12/schema")
+        );
+
+        let properties = schema_json
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("schema should expose top-level properties");
+
+        assert!(properties.contains_key("default_provider"));
+        assert!(properties.contains_key("gateway"));
+        assert!(properties.contains_key("channels_config"));
+        assert!(!properties.contains_key("workspace_dir"));
+        assert!(!properties.contains_key("config_path"));
+
+        assert!(
+            schema_json
+                .get("$defs")
+                .and_then(serde_json::Value::as_object)
+                .is_some(),
+            "schema should include reusable type definitions"
+        );
+    }
+
+    #[test]
     fn observability_config_default() {
         let o = ObservabilityConfig::default();
         assert_eq!(o.backend, "none");
@@ -2891,11 +2949,13 @@ mod tests {
                 matrix: None,
                 signal: None,
                 whatsapp: None,
+                linq: None,
                 email: None,
                 irc: None,
                 lark: None,
                 dingtalk: None,
                 qq: None,
+                message_timeout_secs: 300,
             },
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -2985,8 +3045,8 @@ tool_dispatcher = "xml"
         assert_eq!(parsed.agent.tool_dispatcher, "xml");
     }
 
-    #[test]
-    fn config_save_and_load_tmpdir() {
+    #[tokio::test]
+    async fn config_save_and_load_tmpdir() {
         let dir = std::env::temp_dir().join("redclaw_test_config");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -3030,7 +3090,7 @@ tool_dispatcher = "xml"
         config.save().unwrap();
         assert!(config_path.exists());
 
-        let contents = fs::read_to_string(&config_path).unwrap();
+        let contents = tokio::fs::read_to_string(&config_path).await.unwrap();
         let loaded: Config = toml::from_str(&contents).unwrap();
         assert_eq!(loaded.api_key.as_deref(), Some("sk-roundtrip"));
         assert_eq!(loaded.default_model.as_deref(), Some("test-model"));
@@ -3039,8 +3099,8 @@ tool_dispatcher = "xml"
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn config_save_atomic_cleanup() {
+    #[tokio::test]
+    async fn config_save_atomic_cleanup() {
         let dir =
             std::env::temp_dir().join(format!("redclaw_test_config_{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -3057,7 +3117,7 @@ tool_dispatcher = "xml"
         config.default_model = Some("model-b".into());
         config.save().unwrap();
 
-        let contents = fs::read_to_string(&config_path).unwrap();
+        let contents = tokio::fs::read_to_string(&config_path).await.unwrap();
         assert!(contents.contains("model-b"));
 
         let names: Vec<String> = fs::read_dir(&dir)
@@ -3251,11 +3311,13 @@ tool_dispatcher = "xml"
             }),
             signal: None,
             whatsapp: None,
+            linq: None,
             email: None,
             irc: None,
             lark: None,
             dingtalk: None,
             qq: None,
+            message_timeout_secs: 300,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
@@ -3414,11 +3476,13 @@ channel_id = "C123"
                 app_secret: None,
                 allowed_numbers: vec!["+1".into()],
             }),
+            linq: None,
             email: None,
             irc: None,
             lark: None,
             dingtalk: None,
             qq: None,
+            message_timeout_secs: 300,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();

@@ -1,8 +1,9 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Root policy configuration
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
 pub struct PolicyConfig {
     /// Default action when no rule matches
     #[serde(default = "default_action")]
@@ -22,7 +23,7 @@ fn default_action() -> PolicyAction {
 }
 
 /// Policy for a specific tool
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ToolPolicy {
     /// Allow or deny this tool
     pub action: PolicyAction,
@@ -40,7 +41,7 @@ pub struct ToolPolicy {
 }
 
 /// Channel-specific tool restrictions
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ChannelPolicy {
     /// Tools allowed for this channel
     pub allowed_tools: Option<Vec<String>>,
@@ -49,7 +50,7 @@ pub struct ChannelPolicy {
 }
 
 /// Policy decision
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PolicyAction {
     #[default]
