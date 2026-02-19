@@ -128,7 +128,9 @@ enum Commands {
         /// Provider name (used in quick mode, default: openrouter)
         #[arg(long)]
         provider: Option<String>,
-
+        /// Model ID override (used in quick mode)
+        #[arg(long)]
+        model: Option<String>,
         /// Memory backend (sqlite, lucid, markdown, none) - used in quick mode, default: sqlite
         #[arg(long)]
         memory: Option<String>,
@@ -250,6 +252,18 @@ enum Commands {
         #[command(subcommand)]
         peripheral_command: redclaw::PeripheralCommands,
     },
+
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        config_command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommands {
+    /// Dump the full configuration JSON Schema to stdout
+    Schema,
 }
 
 #[derive(Subcommand, Debug)]
@@ -288,6 +302,23 @@ enum CronCommands {
     Remove {
         /// Task ID
         id: String,
+    },
+    /// Update a scheduled task
+    Update {
+        /// Task ID
+        id: String,
+        /// New cron expression
+        #[arg(long)]
+        expression: Option<String>,
+        /// New IANA timezone
+        #[arg(long)]
+        tz: Option<String>,
+        /// New command to run
+        #[arg(long)]
+        command: Option<String>,
+        /// New job name
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Pause a scheduled task
     Pause {
@@ -497,14 +528,17 @@ async fn main() -> Result<()> {
         channels_only,
         api_key,
         provider,
+        model,
         memory,
     } = &cli.command
     {
         if *interactive && *channels_only {
             bail!("Use either --interactive or --channels-only, not both");
         }
-        if *channels_only && (api_key.is_some() || provider.is_some() || memory.is_some()) {
-            bail!("--channels-only does not accept --api-key, --provider, or --memory");
+        if *channels_only
+            && (api_key.is_some() || provider.is_some() || model.is_some() || memory.is_some())
+        {
+            bail!("--channels-only does not accept --api-key, --provider, --model, or --memory");
         }
 
         let config = if *channels_only {
@@ -512,7 +546,12 @@ async fn main() -> Result<()> {
         } else if *interactive {
             onboard::run_wizard()?
         } else {
-            onboard::run_quick_setup(api_key.as_deref(), provider.as_deref(), memory.as_deref())?
+            onboard::run_quick_setup(
+                api_key.as_deref(),
+                provider.as_deref(),
+                model.as_deref(),
+                memory.as_deref(),
+            )?
         };
         // Auto-start channels if user said yes during wizard
         if std::env::var("REDCLAW_AUTOSTART_CHANNELS").as_deref() == Ok("1") {
@@ -756,6 +795,17 @@ async fn main() -> Result<()> {
         Commands::Peripheral { peripheral_command } => {
             peripherals::handle_command(peripheral_command.clone(), &config)
         }
+
+        Commands::Config { config_command } => match config_command {
+            ConfigCommands::Schema => {
+                let schema = schemars::schema_for!(config::Config);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&schema).expect("failed to serialize JSON Schema")
+                );
+                Ok(())
+            }
+        },
     }
 }
 
