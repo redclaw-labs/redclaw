@@ -12,7 +12,7 @@ on:
     workflow_dispatch:
 
 concurrency:
-    group: feature-matrix-${{ github.event.pull_request.number || github.sha }}
+    group: "feature-matrix-${{ github.ref }}"
     cancel-in-progress: true
 
 permissions:
@@ -38,7 +38,7 @@ jobs:
                       install_libudev: true
                     - name: hardware-only
                       args: --no-default-features --features hardware
-                      install_libudev: false
+                      install_libudev: true
                     - name: browser-native
                       args: --no-default-features --features browser-native
                       install_libudev: false
@@ -57,7 +57,7 @@ jobs:
               if: matrix.install_libudev
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y --no-install-recommends libudev-dev pkg-config
+                  sudo apt-get install -y --no-install-recommends libudev-dev libusb-1.0-0-dev pkg-config
 
             - name: Check feature combination
               run: cargo check --locked ${{ matrix.args }}

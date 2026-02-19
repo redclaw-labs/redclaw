@@ -159,10 +159,9 @@ jobs:
       pull-requests: write
     steps:
       - name: Greet first-time contributors
-        uses: actions/first-interaction@a1db7729b356323c7988c20ed6f0d33fe31297be # v1
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          issue_message: |
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ISSUE_MESSAGE: |
             Thanks for opening this issue.
 
             Before maintainers triage it, please confirm:
@@ -171,7 +170,7 @@ jobs:
             - Sensitive values are redacted
 
             This helps us keep issue throughput high and response latency low.
-          pr_message: |
+          PR_MESSAGE: |
             Thanks for contributing to RedClaw.
 
             For faster review, please ensure:
@@ -181,6 +180,65 @@ jobs:
             - Scope is focused (prefer one concern per PR)
 
             See `CONTRIBUTING.md` and `docs/pr-workflow.md` for full collaboration rules.
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const username = context.payload.sender?.login;
+
+            const issue = context.payload.issue;
+            const pullRequest = context.payload.pull_request;
+            const target = issue ?? pullRequest;
+            if (!target) {
+              core.info("No issue/PR payload found; nothing to do.");
+              return;
+            }
+
+            if (!username) {
+              core.warning("No sender login found; skipping.");
+              return;
+            }
+
+            const isIssue = Boolean(issue);
+            const isPR = Boolean(pullRequest);
+
+            if (isIssue) {
+              const { data } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:issue author:${username}`,
+                per_page: 1,
+              });
+
+              const count = Number(data.total_count || 0);
+              if (count === 1) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: target.number,
+                  body: process.env.ISSUE_MESSAGE,
+                });
+              } else {
+                core.info(`Not first issue for ${username} (count=${count}); skipping.`);
+              }
+            }
+
+            if (isPR) {
+              const { data } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:pr author:${username}`,
+                per_page: 1,
+              });
+
+              const count = Number(data.total_count || 0);
+              if (count === 1) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: target.number,
+                  body: process.env.PR_MESSAGE,
+                });
+              } else {
+                core.info(`Not first PR for ${username} (count=${count}); skipping.`);
+              }
+            }
 
   labeled-routes:
     if: github.event.action == 'labeled'
