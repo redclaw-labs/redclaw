@@ -46,12 +46,20 @@ use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
+
+/// Per-sender conversation history for channel messages.
+type ConversationHistoryMap = Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>;
+
+/// Maximum history messages to keep per sender.
+const MAX_CHANNEL_HISTORY: usize = 50;
 
 /// Maximum characters per injected workspace file (matches `OpenClaw` default).
 const BOOTSTRAP_MAX_CHARS: usize = 20_000;
@@ -64,11 +72,43 @@ const CHANNEL_MESSAGE_TIMEOUT_SECS: u64 = 300;
 const CHANNEL_PARALLELISM_PER_CHANNEL: usize = 4;
 const CHANNEL_MIN_IN_FLIGHT_MESSAGES: usize = 8;
 const CHANNEL_MAX_IN_FLIGHT_MESSAGES: usize = 64;
+const CHANNEL_TYPING_REFRESH_INTERVAL_SECS: u64 = 4;
+const MODEL_CACHE_FILE: &str = "models_cache.json";
+const MODEL_CACHE_PREVIEW_LIMIT: usize = 10;
+
+type ProviderCacheMap = Arc<Mutex<HashMap<String, Arc<dyn Provider>>>>;
+type RouteSelectionMap = Arc<Mutex<HashMap<String, ChannelRouteSelection>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChannelRouteSelection {
+    provider: String,
+    model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChannelRuntimeCommand {
+    ShowProviders,
+    SetProvider(String),
+    ShowModel,
+    SetModel(String),
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ModelCacheState {
+    entries: Vec<ModelCacheEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ModelCacheEntry {
+    provider: String,
+    models: Vec<String>,
+}
 
 #[derive(Clone)]
 struct ChannelRuntimeContext {
     channels_by_name: Arc<HashMap<String, Arc<dyn Channel>>>,
     provider: Arc<dyn Provider>,
+    default_provider: Arc<String>,
     memory: Arc<dyn Memory>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     policy_engine: Option<Arc<PolicyEngine>>,
@@ -78,19 +118,44 @@ struct ChannelRuntimeContext {
     model: Arc<String>,
     temperature: f64,
     auto_save_memory: bool,
+    max_tool_iterations: usize,
+    min_relevance_score: f64,
+    conversation_histories: ConversationHistoryMap,
+    provider_cache: ProviderCacheMap,
+    route_overrides: RouteSelectionMap,
+    api_key: Option<String>,
+    reliability: Arc<crate::config::ReliabilityConfig>,
+    provider_runtime_options: providers::ProviderRuntimeOptions,
+    workspace_dir: Arc<PathBuf>,
 }
 
 fn conversation_memory_key(msg: &traits::ChannelMessage) -> String {
     format!("{}_{}_{}", msg.channel, msg.sender, msg.id)
 }
 
-async fn build_memory_context(mem: &dyn Memory, user_msg: &str) -> String {
+fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
+    format!("{}_{}", msg.channel, msg.sender)
+}
+
+async fn build_memory_context(
+    mem: &dyn Memory,
+    user_msg: &str,
+    min_relevance_score: f64,
+) -> String {
     let mut context = String::new();
 
     if let Ok(entries) = mem.recall(user_msg, 5).await {
-        if !entries.is_empty() {
+        let relevant: Vec<_> = entries
+            .iter()
+            .filter(|e| match e.score {
+                Some(score) => score >= min_relevance_score,
+                None => true, // keep entries without a score (e.g. non-vector backends)
+            })
+            .collect();
+
+        if !relevant.is_empty() {
             context.push_str("[Memory context]\n");
-            for entry in &entries {
+            for entry in &relevant {
                 let _ = writeln!(context, "- {}: {}", entry.key, entry.content);
             }
             context.push('\n');
@@ -98,6 +163,336 @@ async fn build_memory_context(mem: &dyn Memory, user_msg: &str) -> String {
     }
 
     context
+}
+
+fn supports_runtime_model_switch(channel_name: &str) -> bool {
+    matches!(channel_name, "telegram" | "discord")
+}
+
+fn parse_runtime_command(channel_name: &str, content: &str) -> Option<ChannelRuntimeCommand> {
+    if !supports_runtime_model_switch(channel_name) {
+        return None;
+    }
+
+    let trimmed = content.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let command_token = parts.next()?;
+    let base_command = command_token
+        .split('@')
+        .next()
+        .unwrap_or(command_token)
+        .to_ascii_lowercase();
+
+    match base_command.as_str() {
+        "/models" => {
+            if let Some(provider) = parts.next() {
+                Some(ChannelRuntimeCommand::SetProvider(
+                    provider.trim().to_string(),
+                ))
+            } else {
+                Some(ChannelRuntimeCommand::ShowProviders)
+            }
+        }
+        "/model" => {
+            let model = parts.collect::<Vec<_>>().join(" ").trim().to_string();
+            if model.is_empty() {
+                Some(ChannelRuntimeCommand::ShowModel)
+            } else {
+                Some(ChannelRuntimeCommand::SetModel(model))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn resolve_provider_alias(name: &str) -> Option<String> {
+    let candidate = name.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+
+    for provider in providers::list_providers() {
+        if provider.name.eq_ignore_ascii_case(candidate)
+            || provider
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(candidate))
+        {
+            return Some(provider.name.to_string());
+        }
+    }
+
+    None
+}
+
+fn default_route_selection(ctx: &ChannelRuntimeContext) -> ChannelRouteSelection {
+    ChannelRouteSelection {
+        provider: ctx.default_provider.as_str().to_string(),
+        model: ctx.model.as_str().to_string(),
+    }
+}
+
+fn get_route_selection(ctx: &ChannelRuntimeContext, sender_key: &str) -> ChannelRouteSelection {
+    ctx.route_overrides
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(sender_key)
+        .cloned()
+        .unwrap_or_else(|| default_route_selection(ctx))
+}
+
+fn set_route_selection(ctx: &ChannelRuntimeContext, sender_key: &str, next: ChannelRouteSelection) {
+    let default_route = default_route_selection(ctx);
+    let mut routes = ctx
+        .route_overrides
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if next == default_route {
+        routes.remove(sender_key);
+    } else {
+        routes.insert(sender_key.to_string(), next);
+    }
+}
+
+fn clear_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) {
+    ctx.conversation_histories
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(sender_key);
+}
+
+fn load_cached_model_preview(workspace_dir: &Path, provider_name: &str) -> Vec<String> {
+    let cache_path = workspace_dir.join("state").join(MODEL_CACHE_FILE);
+    let Ok(raw) = std::fs::read_to_string(cache_path) else {
+        return Vec::new();
+    };
+    let Ok(state) = serde_json::from_str::<ModelCacheState>(&raw) else {
+        return Vec::new();
+    };
+
+    state
+        .entries
+        .into_iter()
+        .find(|entry| entry.provider == provider_name)
+        .map(|entry| {
+            entry
+                .models
+                .into_iter()
+                .take(MODEL_CACHE_PREVIEW_LIMIT)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+async fn get_or_create_provider(
+    ctx: &ChannelRuntimeContext,
+    provider_name: &str,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    if provider_name == ctx.default_provider.as_str() {
+        return Ok(Arc::clone(&ctx.provider));
+    }
+
+    if let Some(existing) = ctx
+        .provider_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(provider_name)
+        .cloned()
+    {
+        return Ok(existing);
+    }
+
+    let provider: Box<dyn Provider> = match provider_name {
+        "openai-codex" | "openai_codex" | "codex" => providers::create_provider_with_options(
+            provider_name,
+            ctx.api_key.as_deref(),
+            &ctx.provider_runtime_options,
+        )?,
+        _ => providers::create_resilient_provider(
+            provider_name,
+            ctx.api_key.as_deref(),
+            &ctx.reliability,
+        )?,
+    };
+
+    let provider: Arc<dyn Provider> = Arc::from(provider);
+
+    if let Err(err) = provider.warmup().await {
+        tracing::warn!(provider = provider_name, "Provider warmup failed: {err}");
+    }
+
+    let mut cache = ctx.provider_cache.lock().unwrap_or_else(|e| e.into_inner());
+    let cached = cache
+        .entry(provider_name.to_string())
+        .or_insert_with(|| Arc::clone(&provider));
+    Ok(Arc::clone(cached))
+}
+
+fn build_models_help_response(current: &ChannelRouteSelection, workspace_dir: &Path) -> String {
+    let mut response = String::new();
+    let _ = writeln!(
+        response,
+        "Current provider: `{}`\nCurrent model: `{}`",
+        current.provider, current.model
+    );
+    response.push_str("\nSwitch model with `/model <model-id>`.\n");
+
+    let cached_models = load_cached_model_preview(workspace_dir, &current.provider);
+    if cached_models.is_empty() {
+        let _ = writeln!(
+            response,
+            "\nNo cached model list found for `{}`. Ask the operator to run `redclaw models refresh --provider {}`.",
+            current.provider, current.provider
+        );
+    } else {
+        let _ = writeln!(
+            response,
+            "\nCached model IDs (top {}):",
+            cached_models.len()
+        );
+        for model in cached_models {
+            let _ = writeln!(response, "- `{model}`");
+        }
+    }
+
+    response
+}
+
+fn build_providers_help_response(current: &ChannelRouteSelection) -> String {
+    let mut response = String::new();
+    let _ = writeln!(
+        response,
+        "Current provider: `{}`\nCurrent model: `{}`",
+        current.provider, current.model
+    );
+    response.push_str("\nSwitch provider with `/models <provider>`.\n");
+    response.push_str("Switch model with `/model <model-id>`.\n\n");
+    response.push_str("Available providers:\n");
+    for provider in providers::list_providers() {
+        if provider.aliases.is_empty() {
+            let _ = writeln!(response, "- {}", provider.name);
+        } else {
+            let _ = writeln!(
+                response,
+                "- {} (aliases: {})",
+                provider.name,
+                provider.aliases.join(", ")
+            );
+        }
+    }
+    response
+}
+
+async fn handle_runtime_command_if_needed(
+    ctx: &ChannelRuntimeContext,
+    msg: &traits::ChannelMessage,
+    target_channel: Option<&Arc<dyn Channel>>,
+) -> bool {
+    let Some(command) = parse_runtime_command(&msg.channel, &msg.content) else {
+        return false;
+    };
+
+    let Some(channel) = target_channel else {
+        return true;
+    };
+
+    let sender_key = conversation_history_key(msg);
+    let mut current = get_route_selection(ctx, &sender_key);
+
+    let response = match command {
+        ChannelRuntimeCommand::ShowProviders => build_providers_help_response(&current),
+        ChannelRuntimeCommand::SetProvider(raw_provider) => {
+            match resolve_provider_alias(&raw_provider) {
+                Some(provider_name) => match get_or_create_provider(ctx, &provider_name).await {
+                    Ok(_) => {
+                        if provider_name != current.provider {
+                            current.provider = provider_name.clone();
+                            set_route_selection(ctx, &sender_key, current.clone());
+                            clear_sender_history(ctx, &sender_key);
+                        }
+
+                        format!(
+                            "Provider switched to `{provider_name}` for this sender session. Current model is `{}`.\nUse `/model <model-id>` to set a provider-compatible model.",
+                            current.model
+                        )
+                    }
+                    Err(err) => {
+                        let safe_err = providers::sanitize_api_error(&err.to_string());
+                        format!(
+                            "Failed to initialize provider `{provider_name}`. Route unchanged.\nDetails: {safe_err}"
+                        )
+                    }
+                },
+                None => format!(
+                    "Unknown provider `{raw_provider}`. Use `/models` to list valid providers."
+                ),
+            }
+        }
+        ChannelRuntimeCommand::ShowModel => {
+            build_models_help_response(&current, ctx.workspace_dir.as_path())
+        }
+        ChannelRuntimeCommand::SetModel(raw_model) => {
+            let model = raw_model.trim().trim_matches('`').to_string();
+            if model.is_empty() {
+                "Model ID cannot be empty. Use `/model <model-id>`.".to_string()
+            } else {
+                current.model = model.clone();
+                set_route_selection(ctx, &sender_key, current.clone());
+                clear_sender_history(ctx, &sender_key);
+
+                format!(
+                    "Model switched to `{model}` for provider `{}` in this sender session.",
+                    current.provider
+                )
+            }
+        }
+    };
+
+    if let Err(err) = channel
+        .send(&SendMessage::new(response, msg.reply_target.clone()))
+        .await
+    {
+        tracing::warn!(
+            "Failed to send runtime command response on {}: {err}",
+            channel.name()
+        );
+    }
+
+    true
+}
+
+fn spawn_scoped_typing_task(
+    channel: Arc<dyn Channel>,
+    recipient: String,
+    cancellation_token: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let stop_signal = cancellation_token;
+    let refresh_interval = Duration::from_secs(CHANNEL_TYPING_REFRESH_INTERVAL_SECS);
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(refresh_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                () = stop_signal.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Err(e) = channel.start_typing(&recipient).await {
+                        tracing::debug!("Failed to start typing on {}: {e}", channel.name());
+                    }
+                }
+            }
+        }
+
+        if let Err(e) = channel.stop_typing(&recipient).await {
+            tracing::debug!("Failed to stop typing on {}: {e}", channel.name());
+        }
+    });
+
+    handle
 }
 
 fn spawn_supervised_listener(
@@ -163,7 +558,32 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
         truncate_with_ellipsis(&msg.content, 80)
     );
 
-    let memory_context = build_memory_context(ctx.memory.as_ref(), &msg.content).await;
+    let target_channel = ctx.channels_by_name.get(&msg.channel).cloned();
+    if handle_runtime_command_if_needed(ctx.as_ref(), &msg, target_channel.as_ref()).await {
+        return;
+    }
+
+    let history_key = conversation_history_key(&msg);
+    let route = get_route_selection(ctx.as_ref(), &history_key);
+    let active_provider = match get_or_create_provider(ctx.as_ref(), &route.provider).await {
+        Ok(provider) => provider,
+        Err(err) => {
+            let safe_err = providers::sanitize_api_error(&err.to_string());
+            let message = format!(
+                "⚠️ Failed to initialize provider `{}`. Please run `/models` to choose another provider.\nDetails: {safe_err}",
+                route.provider
+            );
+            if let Some(channel) = target_channel.as_ref() {
+                let _ = channel
+                    .send(&SendMessage::new(message, msg.reply_target.clone()))
+                    .await;
+            }
+            return;
+        }
+    };
+
+    let memory_context =
+        build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score).await;
 
     if ctx.auto_save_memory {
         let autosave_key = conversation_memory_key(&msg);
@@ -183,49 +603,134 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
         format!("{memory_context}{}", msg.content)
     };
 
-    let target_channel = ctx.channels_by_name.get(&msg.channel).cloned();
-
-    if let Some(channel) = target_channel.as_ref() {
-        if let Err(e) = channel.start_typing(&msg.reply_target).await {
-            tracing::debug!("Failed to start typing on {}: {e}", channel.name());
-        }
-    }
-
     println!("  ⏳ Processing message...");
     let started_at = Instant::now();
 
-    let mut history = vec![
-        ChatMessage::system(ctx.system_prompt.as_str()),
-        ChatMessage::user(&enriched_message),
-    ];
+    // Build history from per-sender conversation cache
+    let mut prior_turns = ctx
+        .conversation_histories
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&history_key)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut history = vec![ChatMessage::system(ctx.system_prompt.as_str())];
+    history.append(&mut prior_turns);
+    history.push(ChatMessage::user(&enriched_message));
+
+    // Determine if this channel supports streaming draft updates
+    let use_streaming = target_channel
+        .as_ref()
+        .map_or(false, |ch| ch.supports_draft_updates());
+
+    let (delta_tx, delta_rx) = if use_streaming {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let draft_message_id = if use_streaming {
+        if let Some(channel) = target_channel.as_ref() {
+            match channel
+                .send_draft(&SendMessage::new("...", msg.reply_target.clone()))
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::debug!("Failed to send draft on {}: {e}", channel.name());
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let draft_updater = if let (Some(mut rx), Some(draft_id_ref), Some(channel_ref)) = (
+        delta_rx,
+        draft_message_id.as_deref(),
+        target_channel.as_ref(),
+    ) {
+        let channel = Arc::clone(channel_ref);
+        let reply_target = msg.reply_target.clone();
+        let draft_id = draft_id_ref.to_string();
+        Some(tokio::spawn(async move {
+            let mut accumulated = String::new();
+            while let Some(delta) = rx.recv().await {
+                accumulated.push_str(&delta);
+                if let Err(e) = channel
+                    .update_draft(&reply_target, &draft_id, &accumulated)
+                    .await
+                {
+                    tracing::debug!("Draft update failed: {e}");
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
+    let typing_cancellation = target_channel.as_ref().map(|_| CancellationToken::new());
+    let typing_task = match (target_channel.as_ref(), typing_cancellation.as_ref()) {
+        (Some(channel), Some(token)) => Some(spawn_scoped_typing_task(
+            Arc::clone(channel),
+            msg.reply_target.clone(),
+            token.clone(),
+        )),
+        _ => None,
+    };
 
     let llm_result = tokio::time::timeout(
         Duration::from_secs(CHANNEL_MESSAGE_TIMEOUT_SECS),
         run_tool_call_loop(
-            ctx.provider.as_ref(),
+            active_provider.as_ref(),
             &mut history,
             ctx.tools_registry.as_ref(),
             ctx.observer.as_ref(),
-            "channel-runtime",
-            ctx.model.as_str(),
+            route.provider.as_str(),
+            route.model.as_str(),
             ctx.temperature,
             ctx.policy_engine.as_deref(),
             Some(msg.channel.as_str()),
             ctx.cost_tracker.clone(),
             true, // silent — channels don't write to stdout
             None,
+            ctx.max_tool_iterations,
+            delta_tx,
         ),
     )
     .await;
 
-    if let Some(channel) = target_channel.as_ref() {
-        if let Err(e) = channel.stop_typing(&msg.reply_target).await {
-            tracing::debug!("Failed to stop typing on {}: {e}", channel.name());
-        }
+    if let Some(handle) = draft_updater {
+        let _ = handle.await;
+    }
+
+    if let Some(token) = typing_cancellation.as_ref() {
+        token.cancel();
+    }
+    if let Some(handle) = typing_task {
+        log_worker_join_result(handle.await);
     }
 
     match llm_result {
         Ok(Ok(response)) => {
+            // Save user + assistant turn to per-sender history
+            {
+                let mut histories = ctx
+                    .conversation_histories
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let turns = histories.entry(history_key).or_default();
+                turns.push(ChatMessage::user(&enriched_message));
+                turns.push(ChatMessage::assistant(&response));
+                while turns.len() > MAX_CHANNEL_HISTORY {
+                    turns.remove(0);
+                }
+            }
             eprintln!(
                 "  {} Reply ({}ms): {}",
                 redclaw::cli::Theme::primary().apply_to("▸"),
@@ -233,7 +738,17 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
                 truncate_with_ellipsis(&response, 80)
             );
             if let Some(channel) = target_channel.as_ref() {
-                if let Err(e) = channel
+                if let Some(ref draft_id) = draft_message_id {
+                    if let Err(e) = channel
+                        .finalize_draft(&msg.reply_target, draft_id, &response)
+                        .await
+                    {
+                        tracing::warn!("Failed to finalize draft: {e}; sending as new message");
+                        let _ = channel
+                            .send(&SendMessage::new(&response, msg.reply_target.clone()))
+                            .await;
+                    }
+                } else if let Err(e) = channel
                     .send(&SendMessage::new(response, msg.reply_target.clone()))
                     .await
                 {
@@ -252,12 +767,18 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
                 started_at.elapsed().as_millis()
             );
             if let Some(channel) = target_channel.as_ref() {
-                let _ = channel
-                    .send(&SendMessage::new(
-                        format!("⚠️ Error: {e}"),
-                        msg.reply_target.clone(),
-                    ))
-                    .await;
+                if let Some(ref draft_id) = draft_message_id {
+                    let _ = channel
+                        .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
+                        .await;
+                } else {
+                    let _ = channel
+                        .send(&SendMessage::new(
+                            format!("⚠️ Error: {e}"),
+                            msg.reply_target.clone(),
+                        ))
+                        .await;
+                }
             }
         }
         Err(_) => {
@@ -272,12 +793,17 @@ async fn process_channel_message(ctx: Arc<ChannelRuntimeContext>, msg: traits::C
                 started_at.elapsed().as_millis()
             );
             if let Some(channel) = target_channel.as_ref() {
-                let _ = channel
-                    .send(&SendMessage::new(
-                        "⚠️ Request timed out while waiting for the model. Please try again.",
-                        msg.reply_target.clone(),
-                    ))
-                    .await;
+                let error_text =
+                    "⚠️ Request timed out while waiting for the model. Please try again.";
+                if let Some(ref draft_id) = draft_message_id {
+                    let _ = channel
+                        .finalize_draft(&msg.reply_target, draft_id, error_text)
+                        .await;
+                } else {
+                    let _ = channel
+                        .send(&SendMessage::new(error_text, msg.reply_target.clone()))
+                        .await;
+                }
             }
         }
     }
@@ -785,10 +1311,14 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     if let Some(ref tg) = config.channels_config.telegram {
         channels.push((
             "Telegram",
-            Arc::new(TelegramChannel::new(
-                tg.bot_token.clone(),
-                tg.allowed_users.clone(),
-            )),
+            Arc::new(
+                TelegramChannel::new(
+                    tg.bot_token.clone(),
+                    tg.allowed_users.clone(),
+                    tg.mention_only,
+                )
+                .with_streaming(tg.stream_mode, tg.draft_update_interval_ms),
+            ),
         ));
     }
 
@@ -825,11 +1355,13 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     if let Some(ref mx) = config.channels_config.matrix {
         channels.push((
             "Matrix",
-            Arc::new(MatrixChannel::new(
+            Arc::new(MatrixChannel::new_with_session_hint(
                 mx.homeserver.clone(),
                 mx.access_token.clone(),
                 mx.room_id.clone(),
                 mx.allowed_users.clone(),
+                mx.user_id.clone(),
+                mx.device_id.clone(),
             )),
         ));
     }
@@ -914,6 +1446,8 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
                 mm.bot_token.clone(),
                 mm.channel_id.clone(),
                 mm.allowed_users.clone(),
+                mm.thread_replies.unwrap_or(true),
+                mm.mention_only.unwrap_or(false),
             )),
         ));
     }
@@ -1038,8 +1572,9 @@ pub async fn start_channels(config: Config) -> Result<()> {
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
     let temperature = config.default_temperature;
-    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory(
+    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
         &config.memory,
+        Some(&config.storage.provider.config),
         &config.workspace_dir,
         config.api_key.as_deref(),
     )?);
@@ -1150,10 +1685,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
 
     if let Some(ref tg) = config.channels_config.telegram {
-        channels.push(Arc::new(TelegramChannel::new(
-            tg.bot_token.clone(),
-            tg.allowed_users.clone(),
-        )));
+        channels.push(Arc::new(
+            TelegramChannel::new(
+                tg.bot_token.clone(),
+                tg.allowed_users.clone(),
+                tg.mention_only,
+            )
+            .with_streaming(tg.stream_mode, tg.draft_update_interval_ms),
+        ));
     }
 
     if let Some(ref dc) = config.channels_config.discord {
@@ -1179,6 +1718,8 @@ pub async fn start_channels(config: Config) -> Result<()> {
             mm.bot_token.clone(),
             mm.channel_id.clone(),
             mm.allowed_users.clone(),
+            mm.thread_replies.unwrap_or(true),
+            mm.mention_only.unwrap_or(false),
         )));
     }
 
@@ -1187,11 +1728,13 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     if let Some(ref mx) = config.channels_config.matrix {
-        channels.push(Arc::new(MatrixChannel::new(
+        channels.push(Arc::new(MatrixChannel::new_with_session_hint(
             mx.homeserver.clone(),
             mx.access_token.clone(),
             mx.room_id.clone(),
             mx.allowed_users.clone(),
+            mx.user_id.clone(),
+            mx.device_id.clone(),
         )));
     }
 
@@ -1271,9 +1814,13 @@ pub async fn start_channels(config: Config) -> Result<()> {
 
     redclaw::cli::print_service_start("Channels");
     eprintln!("  Model:    {model}");
+    let effective_memory_backend = memory::effective_memory_backend_name(
+        &config.memory.backend,
+        Some(&config.storage.provider.config),
+    );
     eprintln!(
         "  Memory:   {} (auto-save: {})",
-        config.memory.backend,
+        effective_memory_backend,
         if config.memory.auto_save { "on" } else { "off" }
     );
     eprintln!(
@@ -1330,6 +1877,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     let runtime_ctx = Arc::new(ChannelRuntimeContext {
         channels_by_name,
         provider: Arc::clone(&provider),
+        default_provider: Arc::new(provider_name.clone()),
         memory: Arc::clone(&mem),
         tools_registry: Arc::clone(&tools_registry),
         policy_engine,
@@ -1339,6 +1887,19 @@ pub async fn start_channels(config: Config) -> Result<()> {
         model: Arc::new(model.clone()),
         temperature,
         auto_save_memory: config.memory.auto_save,
+        max_tool_iterations: config.agent.max_tool_iterations,
+        min_relevance_score: config.memory.min_relevance_score,
+        conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+        provider_cache: Arc::new(Mutex::new(HashMap::new())),
+        route_overrides: Arc::new(Mutex::new(HashMap::new())),
+        api_key: config.api_key.clone(),
+        reliability: Arc::new(config.reliability.clone()),
+        provider_runtime_options: providers::ProviderRuntimeOptions {
+            auth_profile_override: None,
+            redclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+            secrets_encrypt: config.secrets.encrypt,
+        },
+        workspace_dir: Arc::new(config.workspace_dir.clone()),
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -1556,6 +2117,7 @@ mod tests {
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
             provider: Arc::new(ToolCallingProvider),
+            default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             policy_engine: None,
@@ -1565,6 +2127,15 @@ mod tests {
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
+            max_tool_iterations: 10,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::path::PathBuf::from(".")),
         });
 
         process_channel_message(
@@ -1598,6 +2169,7 @@ mod tests {
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
             provider: Arc::new(ToolCallingAliasProvider),
+            default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             policy_engine: None,
@@ -1607,6 +2179,15 @@ mod tests {
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
+            max_tool_iterations: 10,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::path::PathBuf::from(".")),
         });
 
         process_channel_message(
@@ -1692,6 +2273,7 @@ mod tests {
             provider: Arc::new(SlowProvider {
                 delay: Duration::from_millis(250),
             }),
+            default_provider: Arc::new("test-provider".to_string()),
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             policy_engine: None,
@@ -1701,6 +2283,15 @@ mod tests {
             model: Arc::new("test-model".to_string()),
             temperature: 0.0,
             auto_save_memory: false,
+            max_tool_iterations: 10,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::path::PathBuf::from(".")),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -2043,7 +2634,7 @@ mod tests {
             .await
             .unwrap();
 
-        let context = build_memory_context(&mem, "age").await;
+        let context = build_memory_context(&mem, "age", 0.0).await;
         assert!(context.contains("[Memory context]"));
         assert!(context.contains("Age is 45"));
     }

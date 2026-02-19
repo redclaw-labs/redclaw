@@ -8,12 +8,20 @@ use uuid::Uuid;
 /// Messages are received via the gateway's `/whatsapp` webhook endpoint.
 /// The `listen` method here is a no-op placeholder; actual message handling
 /// happens in the gateway when Meta sends webhook events.
+fn ensure_https(url: &str) -> anyhow::Result<()> {
+    if !url.starts_with("https://") {
+        anyhow::bail!(
+            "Refusing to transmit sensitive data over non-HTTPS URL: URL scheme must be https"
+        );
+    }
+    Ok(())
+}
+
 pub struct WhatsAppChannel {
     access_token: String,
     phone_number_id: String,
     verify_token: String,
     allowed_numbers: Vec<String>,
-    client: reqwest::Client,
 }
 
 impl WhatsAppChannel {
@@ -28,8 +36,11 @@ impl WhatsAppChannel {
             phone_number_id,
             verify_token,
             allowed_numbers,
-            client: reqwest::Client::new(),
         }
+    }
+
+    fn http_client(&self) -> reqwest::Client {
+        crate::config::build_runtime_proxy_client("channel.whatsapp")
     }
 
     /// Check if a phone number is allowed (E.164 format: +1234567890)
@@ -146,6 +157,8 @@ impl Channel for WhatsAppChannel {
             self.phone_number_id
         );
 
+        ensure_https(&url)?;
+
         // Normalize recipient (remove leading + if present for API)
         let to = message
             .recipient
@@ -164,9 +177,9 @@ impl Channel for WhatsAppChannel {
         });
 
         let resp = self
-            .client
+            .http_client()
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.access_token))
+            .bearer_auth(&self.access_token)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -201,9 +214,13 @@ impl Channel for WhatsAppChannel {
         // Check if we can reach the WhatsApp API
         let url = format!("https://graph.facebook.com/v18.0/{}", self.phone_number_id);
 
-        self.client
+        if ensure_https(&url).is_err() {
+            return false;
+        }
+
+        self.http_client()
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.access_token))
+            .bearer_auth(&self.access_token)
             .send()
             .await
             .map(|r| r.status().is_success())
