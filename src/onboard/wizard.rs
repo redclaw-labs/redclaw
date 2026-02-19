@@ -2,7 +2,7 @@ use crate::config::schema::{DingTalkConfig, IrcConfig, QQConfig, WhatsAppConfig}
 use crate::config::{
     AutonomyConfig, BrowserConfig, ChannelsConfig, ComposioConfig, Config, DiscordConfig,
     HeartbeatConfig, IMessageConfig, MatrixConfig, MemoryConfig, ObservabilityConfig,
-    RuntimeConfig, SecretsConfig, SlackConfig, TelegramConfig, WebhookConfig,
+    RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig, WebhookConfig,
 };
 use crate::hardware::{self, HardwareConfig};
 use crate::memory::{
@@ -121,15 +121,19 @@ pub fn run_wizard() -> Result<Config> {
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
         model_routes: Vec::new(),
+        query_classification: crate::config::QueryClassificationConfig::default(),
         heartbeat: HeartbeatConfig::default(),
         channels_config,
         memory: memory_config, // User-selected memory backend
+        storage: StorageConfig::default(),
         tunnel: tunnel_config,
         gateway: crate::config::GatewayConfig::default(),
         composio: composio_config,
         secrets: secrets_config,
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
+        web_search: crate::config::WebSearchConfig::default(),
+        proxy: crate::config::ProxyConfig::default(),
         identity: crate::config::IdentityConfig::default(),
         cost: crate::config::CostConfig::default(),
         peripherals: crate::config::PeripheralsConfig::default(),
@@ -163,7 +167,8 @@ pub fn run_wizard() -> Result<Config> {
         || config.channels_config.matrix.is_some()
         || config.channels_config.email.is_some()
         || config.channels_config.dingtalk.is_some()
-        || config.channels_config.qq.is_some();
+        || config.channels_config.qq.is_some()
+        || config.channels_config.lark.is_some();
 
     if has_channels && config.api_key.is_some() {
         let launch: bool = Confirm::new()
@@ -222,7 +227,8 @@ pub fn run_channels_repair_wizard() -> Result<Config> {
         || config.channels_config.matrix.is_some()
         || config.channels_config.email.is_some()
         || config.channels_config.dingtalk.is_some()
-        || config.channels_config.qq.is_some();
+        || config.channels_config.qq.is_some()
+        || config.channels_config.lark.is_some();
 
     if has_channels && config.api_key.is_some() {
         let launch: bool = Confirm::new()
@@ -275,6 +281,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
         embedding_dimensions: 1536,
         vector_weight: 0.7,
         keyword_weight: 0.3,
+        min_relevance_score: 0.4,
         embedding_cache_size: if profile.uses_sqlite_hygiene {
             10000
         } else {
@@ -287,6 +294,7 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
         snapshot_enabled: false,
         snapshot_on_hygiene: false,
         auto_hydrate: true,
+        sqlite_open_timeout_secs: None,
     }
 }
 
@@ -326,7 +334,11 @@ pub fn run_quick_setup(
     let config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
-        api_key: api_key.map(String::from),
+        api_key: api_key.map(|c| {
+            let mut s = String::with_capacity(c.len());
+            s.push_str(c);
+            s
+        }),
         default_provider: Some(provider_name.clone()),
         default_model: Some(model.clone()),
         default_temperature: 0.7,
@@ -338,15 +350,19 @@ pub fn run_quick_setup(
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
         model_routes: Vec::new(),
+        query_classification: crate::config::QueryClassificationConfig::default(),
         heartbeat: HeartbeatConfig::default(),
         channels_config: ChannelsConfig::default(),
         memory: memory_config,
+        storage: StorageConfig::default(),
         tunnel: crate::config::TunnelConfig::default(),
         gateway: crate::config::GatewayConfig::default(),
         composio: ComposioConfig::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
+        web_search: crate::config::WebSearchConfig::default(),
+        proxy: crate::config::ProxyConfig::default(),
         identity: crate::config::IdentityConfig::default(),
         cost: crate::config::CostConfig::default(),
         peripherals: crate::config::PeripheralsConfig::default(),
@@ -2549,6 +2565,9 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 config.telegram = Some(TelegramConfig {
                     bot_token: token,
                     allowed_users,
+                    stream_mode: crate::config::StreamMode::default(),
+                    draft_update_interval_ms: 1000,
+                    mention_only: false,
                 });
             }
             1 => {
@@ -2904,6 +2923,8 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     access_token,
                     room_id,
                     allowed_users,
+                    user_id: None,
+                    device_id: None,
                 });
             }
             5 => {
