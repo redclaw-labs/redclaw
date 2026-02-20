@@ -3,6 +3,27 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
+/// Structured error returned when a requested provider capability is not supported.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("provider_capability_error provider={provider} capability={capability} message={message}")]
+pub struct ProviderCapabilityError {
+    pub provider: String,
+    pub capability: String,
+    pub message: String,
+}
+
+/// Provider capabilities declaration.
+///
+/// Describes what features a provider supports, enabling intelligent
+/// routing and safe fallbacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProviderCapabilities {
+    /// Whether the provider supports native tool calling over its API.
+    pub native_tool_calling: bool,
+    /// Whether the provider supports vision / image inputs.
+    pub vision: bool,
+}
+
 /// Provider-specific tool payload formats.
 ///
 /// Different LLM providers require different formats for tool definitions.
@@ -119,6 +140,21 @@ pub enum ConversationMessage {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Provider capabilities.
+    ///
+    /// Default maps legacy `supports_native_tools()` into `native_tool_calling`.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            native_tool_calling: self.supports_native_tools(),
+            vision: false,
+        }
+    }
+
+    /// Whether provider supports multimodal vision input.
+    fn supports_vision(&self) -> bool {
+        self.capabilities().vision
+    }
+
     /// Simple one-shot chat (single user message, no explicit system prompt).
     ///
     /// This is the preferred API for non-agentic direct interactions.
@@ -413,6 +449,64 @@ mod tests {
         let instructions = build_tool_instructions_text(&[]);
         assert!(instructions.contains("Tool Use Protocol"));
         assert!(instructions.contains("Available Tools"));
+    }
+
+    struct CapabilityMockProvider;
+
+    #[async_trait]
+    impl Provider for CapabilityMockProvider {
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                native_tool_calling: true,
+                vision: true,
+            }
+        }
+
+        fn supports_native_tools(&self) -> bool {
+            true
+        }
+
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+    }
+
+    #[test]
+    fn provider_capabilities_default() {
+        let caps = ProviderCapabilities::default();
+        assert!(!caps.native_tool_calling);
+        assert!(!caps.vision);
+    }
+
+    #[test]
+    fn provider_capabilities_equality() {
+        let caps1 = ProviderCapabilities {
+            native_tool_calling: true,
+            vision: false,
+        };
+        let caps2 = ProviderCapabilities {
+            native_tool_calling: true,
+            vision: false,
+        };
+        let caps3 = ProviderCapabilities {
+            native_tool_calling: false,
+            vision: false,
+        };
+
+        assert_eq!(caps1, caps2);
+        assert_ne!(caps1, caps3);
+    }
+
+    #[test]
+    fn supports_vision_reflects_capabilities_default_mapping() {
+        let provider = CapabilityMockProvider;
+        assert!(provider.supports_vision());
     }
 
     struct MockProvider {
