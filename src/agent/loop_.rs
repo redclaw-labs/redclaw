@@ -3,9 +3,12 @@ use crate::config::Config;
 use crate::cost::{BudgetCheck, CostTracker, TokenUsage};
 use crate::errors::TOOL_PERMISSION_DENIED;
 use crate::memory::{self, Memory, MemoryCategory};
+use crate::multimodal;
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::policy::{PolicyAction, PolicyEngine};
-use crate::providers::{self, ChatMessage, ChatRequest, Provider, ToolCall};
+use crate::providers::{
+    self, ChatMessage, ChatRequest, Provider, ProviderCapabilityError, ToolCall,
+};
 use crate::runtime;
 use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
@@ -16,6 +19,7 @@ use std::fmt::Write;
 use std::io::Write as _;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Minimum characters per chunk when relaying LLM text to a streaming draft.
@@ -291,9 +295,16 @@ async fn build_context(mem: &dyn Memory, user_msg: &str, min_relevance_score: f6
         if !relevant.is_empty() {
             context.push_str("[Memory context]\n");
             for entry in &relevant {
+                if memory::is_assistant_autosave_key(&entry.key) {
+                    continue;
+                }
                 let _ = writeln!(context, "- {}: {}", entry.key, entry.content);
             }
-            context.push('\n');
+            if context == "[Memory context]\n" {
+                context.clear();
+            } else {
+                context.push('\n');
+            }
         }
     }
 
@@ -627,6 +638,21 @@ struct ParsedToolCall {
     arguments: serde_json::Value,
 }
 
+#[derive(Debug)]
+pub(crate) struct ToolLoopCancelled;
+
+impl std::fmt::Display for ToolLoopCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("tool loop cancelled")
+    }
+}
+
+impl std::error::Error for ToolLoopCancelled {}
+
+pub(crate) fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
+    err.chain().any(|source| source.is::<ToolLoopCancelled>())
+}
+
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
 /// When `silent` is true, suppresses stdout (for channel use).
@@ -644,6 +670,7 @@ pub(crate) async fn agent_turn(
     cost_tracker: Option<Arc<CostTracker>>,
     silent: bool,
     approval: Option<&ApprovalManager>,
+    multimodal_config: &crate::config::MultimodalConfig,
     max_tool_iterations: usize,
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
@@ -660,7 +687,9 @@ pub(crate) async fn agent_turn(
         cost_tracker,
         silent,
         approval,
+        multimodal_config,
         max_tool_iterations,
+        None,
         on_delta,
     )
     .await
@@ -682,7 +711,9 @@ pub(crate) async fn run_tool_call_loop(
     cost_tracker: Option<Arc<CostTracker>>,
     silent: bool,
     approval: Option<&ApprovalManager>,
+    multimodal_config: &crate::config::MultimodalConfig,
     max_tool_iterations: usize,
+    cancellation_token: Option<CancellationToken>,
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let max_iterations = if max_tool_iterations == 0 {
@@ -696,6 +727,30 @@ pub(crate) async fn run_tool_call_loop(
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
 
     for _iteration in 0..max_iterations {
+        if cancellation_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ToolLoopCancelled.into());
+        }
+
+        let image_marker_count = multimodal::count_image_markers(history);
+        if image_marker_count > 0 && !provider.supports_vision() {
+            return Err(
+                ProviderCapabilityError {
+                    provider: provider_name.to_string(),
+                    capability: "vision".to_string(),
+                    message: format!(
+                        "received {image_marker_count} image marker(s), but this provider does not support vision input"
+                    ),
+                }
+                .into(),
+            );
+        }
+
+        let prepared_messages =
+            multimodal::prepare_messages_for_provider(history, multimodal_config).await?;
+
         let estimated_prompt_tokens = cost_tracker
             .as_deref()
             .map(|_| estimate_input_tokens(history));
@@ -757,17 +812,25 @@ pub(crate) async fn run_tool_call_loop(
         };
 
         let llm_started_at = Instant::now();
-        let response = match provider
-            .chat(
-                ChatRequest {
-                    messages: history.as_slice(),
-                    tools: request_tools,
-                },
-                model,
-                temperature,
-            )
-            .await
-        {
+        let chat_future = provider.chat(
+            ChatRequest {
+                messages: prepared_messages.messages.as_slice(),
+                tools: request_tools,
+            },
+            model,
+            temperature,
+        );
+
+        let chat_result = if let Some(token) = cancellation_token.as_ref() {
+            tokio::select! {
+                () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                result = chat_future => result,
+            }
+        } else {
+            chat_future.await
+        };
+
+        let response = match chat_result {
             Ok(resp) => {
                 observer.record_event(&ObserverEvent::LlmResponse {
                     provider: provider_name.to_string(),
@@ -884,6 +947,12 @@ pub(crate) async fn run_tool_call_loop(
             if let Some(ref tx) = on_delta {
                 let mut chunk = String::new();
                 for word in display_text.split_inclusive(char::is_whitespace) {
+                    if cancellation_token
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                    {
+                        return Err(ToolLoopCancelled.into());
+                    }
                     chunk.push_str(word);
                     if chunk.len() >= STREAM_CHUNK_MIN_CHARS
                         && tx.send(std::mem::take(&mut chunk)).await.is_err()
@@ -979,7 +1048,16 @@ pub(crate) async fn run_tool_call_loop(
                                 "Policy: AUDIT — tool call logged"
                             );
                             engine.record_call(&call.name);
-                            match tool.execute(call.arguments.clone()).await {
+                            let tool_future = tool.execute(call.arguments.clone());
+                            let tool_result = if let Some(token) = cancellation_token.as_ref() {
+                                tokio::select! {
+                                    () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                                    result = tool_future => result,
+                                }
+                            } else {
+                                tool_future.await
+                            };
+                            match tool_result {
                                 Ok(r) => {
                                     observer.record_event(&ObserverEvent::ToolCall {
                                         tool: call.name.clone(),
@@ -1004,7 +1082,16 @@ pub(crate) async fn run_tool_call_loop(
                         }
                         PolicyAction::Allow => {
                             engine.record_call(&call.name);
-                            match tool.execute(call.arguments.clone()).await {
+                            let tool_future = tool.execute(call.arguments.clone());
+                            let tool_result = if let Some(token) = cancellation_token.as_ref() {
+                                tokio::select! {
+                                    () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                                    result = tool_future => result,
+                                }
+                            } else {
+                                tool_future.await
+                            };
+                            match tool_result {
                                 Ok(r) => {
                                     observer.record_event(&ObserverEvent::ToolCall {
                                         tool: call.name.clone(),
@@ -1029,7 +1116,16 @@ pub(crate) async fn run_tool_call_loop(
                         }
                     }
                 } else {
-                    match tool.execute(call.arguments.clone()).await {
+                    let tool_future = tool.execute(call.arguments.clone());
+                    let tool_result = if let Some(token) = cancellation_token.as_ref() {
+                        tokio::select! {
+                            () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                            result = tool_future => result,
+                        }
+                    } else {
+                        tool_future.await
+                    };
+                    match tool_result {
                         Ok(r) => {
                             observer.record_event(&ObserverEvent::ToolCall {
                                 tool: call.name.clone(),
@@ -1213,6 +1309,7 @@ pub async fn run(
     let provider: Box<dyn Provider> = providers::create_routed_provider(
         provider_name,
         config.api_key.as_deref(),
+        None,
         &config.reliability,
         &config.model_routes,
         model_name,
@@ -1396,21 +1493,14 @@ pub async fn run(
             cost_tracker.clone(),
             false,
             Some(&approval_manager),
+            &config.multimodal,
             config.agent.max_tool_iterations,
+            None,
             None,
         )
         .await?;
         println!("{response}");
         observer.record_event(&ObserverEvent::TurnComplete);
-
-        // Auto-save assistant response to daily log
-        if config.memory.auto_save {
-            let summary = truncate_with_ellipsis(&response, 100);
-            let response_key = autosave_memory_key("assistant_resp");
-            let _ = mem
-                .store(&response_key, &summary, MemoryCategory::Daily)
-                .await;
-        }
     } else {
         redclaw::cli::print_banner();
         redclaw::cli::print_service_start("Interactive Mode");
@@ -1484,7 +1574,9 @@ pub async fn run(
                 cost_tracker.clone(),
                 false,
                 Some(&approval_manager),
+                &config.multimodal,
                 config.agent.max_tool_iterations,
+                None,
                 None,
             )
             .await
@@ -1604,6 +1696,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     let provider: Box<dyn Provider> = providers::create_routed_provider(
         provider_name,
         config.api_key.as_deref(),
+        None,
         &config.reliability,
         &config.model_routes,
         &model_name,
@@ -1725,6 +1818,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         cost_tracker,
         true,
         Some(&approval_manager),
+        &config.multimodal,
         config.agent.max_tool_iterations,
         None,
     )
