@@ -21,6 +21,8 @@ pub struct DelegateTool {
     security: Arc<SecurityPolicy>,
     /// Global API key fallback (from config.api_key)
     fallback_api_key: Option<String>,
+    /// Provider runtime options inherited from root config.
+    provider_runtime_options: providers::ProviderRuntimeOptions,
     /// Depth at which this tool instance lives in the delegation chain.
     depth: u32,
 }
@@ -31,10 +33,25 @@ impl DelegateTool {
         fallback_api_key: Option<String>,
         security: Arc<SecurityPolicy>,
     ) -> Self {
+        Self::new_with_options(
+            agents,
+            fallback_api_key,
+            security,
+            providers::ProviderRuntimeOptions::default(),
+        )
+    }
+
+    pub fn new_with_options(
+        agents: HashMap<String, DelegateAgentConfig>,
+        fallback_api_key: Option<String>,
+        security: Arc<SecurityPolicy>,
+        provider_runtime_options: providers::ProviderRuntimeOptions,
+    ) -> Self {
         Self {
             agents: Arc::new(agents),
             security,
             fallback_api_key,
+            provider_runtime_options,
             depth: 0,
         }
     }
@@ -48,10 +65,27 @@ impl DelegateTool {
         security: Arc<SecurityPolicy>,
         depth: u32,
     ) -> Self {
+        Self::with_depth_and_options(
+            agents,
+            fallback_api_key,
+            security,
+            depth,
+            providers::ProviderRuntimeOptions::default(),
+        )
+    }
+
+    pub fn with_depth_and_options(
+        agents: HashMap<String, DelegateAgentConfig>,
+        fallback_api_key: Option<String>,
+        security: Arc<SecurityPolicy>,
+        depth: u32,
+        provider_runtime_options: providers::ProviderRuntimeOptions,
+    ) -> Self {
         Self {
             agents: Arc::new(agents),
             security,
             fallback_api_key,
+            provider_runtime_options,
             depth,
         }
     }
@@ -188,20 +222,23 @@ impl Tool for DelegateTool {
             .as_deref()
             .or(self.fallback_api_key.as_deref());
 
-        let provider: Box<dyn Provider> =
-            match providers::create_provider(&agent_config.provider, api_key) {
-                Ok(p) => p,
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "Failed to create provider '{}' for agent '{agent_name}': {e}",
-                            agent_config.provider
-                        )),
-                    });
-                }
-            };
+        let provider: Box<dyn Provider> = match providers::create_provider_with_options(
+            &agent_config.provider,
+            api_key,
+            &self.provider_runtime_options,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Failed to create provider '{}' for agent '{agent_name}': {e}",
+                        agent_config.provider
+                    )),
+                });
+            }
+        };
 
         // Build the message
         let full_prompt = if context.is_empty() {
