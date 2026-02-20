@@ -9,13 +9,13 @@ pub use schema::{
 pub use schema::{
     AgentConfig, AuditConfig, AutonomyConfig, BrowserComputerUseConfig, BrowserConfig,
     ChannelsConfig, ComposioConfig, Config, CostConfig, DelegateAgentConfig, DiscordConfig,
-    DockerRuntimeConfig, GatewayConfig, HardwareConfig, HardwareTransport, HeartbeatConfig,
-    HttpRequestConfig, IMessageConfig, IdentityConfig, LarkConfig, MatrixConfig, MemoryConfig,
-    ModelRouteConfig, ObservabilityConfig, PeripheralBoardConfig, PeripheralsConfig, ProxyConfig,
-    ProxyScope, QueryClassificationConfig, ReliabilityConfig, ResourceLimitsConfig, RuntimeConfig,
-    SandboxBackend, SandboxConfig, SchedulerConfig, SecretsConfig, SecurityConfig, SlackConfig,
-    StorageConfig, StorageProviderConfig, StreamMode, TelegramConfig, TunnelConfig,
-    WebSearchConfig, WebhookConfig,
+    DockerRuntimeConfig, EmbeddingRouteConfig, GatewayConfig, HardwareConfig, HardwareTransport,
+    HeartbeatConfig, HttpRequestConfig, IMessageConfig, IdentityConfig, LarkConfig, MatrixConfig,
+    MemoryConfig, ModelRouteConfig, MultimodalConfig, ObservabilityConfig, PeripheralBoardConfig,
+    PeripheralsConfig, ProxyConfig, ProxyScope, QueryClassificationConfig, ReliabilityConfig,
+    ResourceLimitsConfig, RuntimeConfig, SandboxBackend, SandboxConfig, SchedulerConfig,
+    SecretsConfig, SecurityConfig, SlackConfig, StorageConfig, StorageProviderConfig, StreamMode,
+    TelegramConfig, TunnelConfig, WebSearchConfig, WebhookConfig,
 };
 
 #[cfg(test)]
@@ -38,6 +38,7 @@ mod tests {
             allowed_users: vec!["alice".into()],
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,
+            interrupt_on_new_message: false,
             mention_only: false,
         };
 

@@ -8,10 +8,12 @@ use directories::UserDirs;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+#[cfg(unix)]
+use tokio::fs::File;
+use tokio::fs::{self, OpenOptions};
+use tokio::io::AsyncWriteExt;
 
 const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "provider.anthropic",
@@ -58,6 +60,8 @@ pub struct Config {
     #[serde(skip)]
     pub config_path: PathBuf,
     pub api_key: Option<String>,
+    /// Base URL override for provider API (e.g. "http://10.0.0.1:11434" for remote Ollama)
+    pub api_url: Option<String>,
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
     pub default_temperature: f64,
@@ -88,12 +92,20 @@ pub struct Config {
     #[serde(default)]
     pub model_routes: Vec<ModelRouteConfig>,
 
+    /// Embedding routing rules — route `hint:<name>` to specific provider+model combos.
+    #[serde(default)]
+    pub embedding_routes: Vec<EmbeddingRouteConfig>,
+
     /// Automatic query classification — maps user messages to model hints.
     #[serde(default)]
     pub query_classification: QueryClassificationConfig,
 
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+
+    /// Cron job configuration.
+    #[serde(default)]
+    pub cron: CronConfig,
 
     #[serde(default)]
     pub channels_config: ChannelsConfig,
@@ -121,6 +133,10 @@ pub struct Config {
 
     #[serde(default)]
     pub http_request: HttpRequestConfig,
+
+    /// Multimodal (image) handling configuration.
+    #[serde(default)]
+    pub multimodal: MultimodalConfig,
 
     #[serde(default)]
     pub web_search: WebSearchConfig,
@@ -642,7 +658,7 @@ impl Default for GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComposioConfig {
     /// Enable Composio integration for 1000+ OAuth tools
-    #[serde(default)]
+    #[serde(default, alias = "enable")]
     pub enabled: bool,
     /// Composio API key (stored encrypted when secrets.encrypt = true)
     #[serde(default)]
@@ -1594,6 +1610,13 @@ pub struct RuntimeConfig {
     /// Docker runtime settings (used when `kind = "docker"`).
     #[serde(default)]
     pub docker: DockerRuntimeConfig,
+
+    /// Global reasoning override for providers that expose explicit controls.
+    /// - `None`: provider default behavior
+    /// - `Some(true)`: request reasoning/thinking when supported
+    /// - `Some(false)`: disable reasoning/thinking when supported
+    #[serde(default)]
+    pub reasoning_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1666,6 +1689,7 @@ impl Default for RuntimeConfig {
         Self {
             kind: default_runtime_kind(),
             docker: DockerRuntimeConfig::default(),
+            reasoning_enabled: None,
         }
     }
 }
@@ -1812,6 +1836,73 @@ pub struct ModelRouteConfig {
     pub api_key: Option<String>,
 }
 
+/// Route an embedding hint to a specific embedding provider + model.
+///
+/// ```toml
+/// [[embedding_routes]]
+/// hint = "semantic"
+/// provider = "openai"
+/// model = "text-embedding-3-small"
+/// dimensions = 1536
+///
+/// [[embedding_routes]]
+/// hint = "archive"
+/// provider = "custom:https://embed.example.com/v1"
+/// model = "your-embedding-model-id"
+/// dimensions = 1024
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EmbeddingRouteConfig {
+    /// Embedding hint name (e.g. "semantic", "archive", "faq")
+    pub hint: String,
+    /// Embedding provider to route to ("none" | "openai" | "custom:<url>")
+    pub provider: String,
+    /// Embedding model name (provider-specific)
+    pub model: String,
+    /// Optional embedding vector dimensions override
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+    /// Optional API key override for this route's provider
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+// ── Multimodal ─────────────────────────────────────────────────
+
+fn default_multimodal_max_images() -> usize {
+    4
+}
+
+fn default_multimodal_max_image_size_mb() -> usize {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MultimodalConfig {
+    #[serde(default = "default_multimodal_max_images")]
+    pub max_images: usize,
+    #[serde(default = "default_multimodal_max_image_size_mb")]
+    pub max_image_size_mb: usize,
+    #[serde(default)]
+    pub allow_remote_fetch: bool,
+}
+
+impl Default for MultimodalConfig {
+    fn default() -> Self {
+        Self {
+            max_images: default_multimodal_max_images(),
+            max_image_size_mb: default_multimodal_max_image_size_mb(),
+            allow_remote_fetch: false,
+        }
+    }
+}
+
+impl MultimodalConfig {
+    pub fn effective_limits(&self) -> (usize, usize) {
+        (self.max_images.max(1), self.max_image_size_mb.max(1))
+    }
+}
+
 // ── Query Classification ─────────────────────────────────────────
 
 /// Automatic query classification — classifies user messages by keyword/pattern
@@ -1859,6 +1950,31 @@ impl Default for HeartbeatConfig {
         Self {
             enabled: false,
             interval_minutes: 30,
+        }
+    }
+}
+
+// ── Cron ────────────────────────────────────────────────────────
+
+fn default_max_run_history() -> u32 {
+    50
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronConfig {
+    /// Enable the cron subsystem.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum number of historical cron run records to retain.
+    #[serde(default = "default_max_run_history")]
+    pub max_run_history: u32,
+}
+
+impl Default for CronConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            max_run_history: default_max_run_history(),
         }
     }
 }
@@ -1997,6 +2113,11 @@ pub struct TelegramConfig {
     #[serde(default = "default_draft_update_interval_ms")]
     pub draft_update_interval_ms: u64,
 
+    /// When true, a newer Telegram message from the same sender in the same chat
+    /// cancels the in-flight request and starts a fresh response with preserved history.
+    #[serde(default)]
+    pub interrupt_on_new_message: bool,
+
     /// When true, only respond to messages that explicitly @-mention the bot in group chats.
     /// Direct messages always work regardless of this setting.
     #[serde(default)]
@@ -2102,16 +2223,34 @@ pub struct SignalConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WhatsAppConfig {
-    /// Access token from Meta Business Suite
-    pub access_token: String,
-    /// Phone number ID from Meta Business API
-    pub phone_number_id: String,
+    /// Access token from Meta Business Suite (Cloud API mode)
+    #[serde(default)]
+    pub access_token: Option<String>,
+    /// Phone number ID from Meta Business API (Cloud API mode)
+    #[serde(default)]
+    pub phone_number_id: Option<String>,
     /// Webhook verify token (you define this, Meta sends it back for verification)
-    pub verify_token: String,
+    /// Only used in Cloud API mode.
+    #[serde(default)]
+    pub verify_token: Option<String>,
     /// App secret from Meta Business Suite (for webhook signature verification)
     /// Can also be set via `REDCLAW_WHATSAPP_APP_SECRET` environment variable
+    /// Only used in Cloud API mode.
     #[serde(default)]
     pub app_secret: Option<String>,
+    /// Session database path for WhatsApp Web client (Web mode)
+    /// When set, enables native WhatsApp Web mode.
+    #[serde(default)]
+    pub session_path: Option<String>,
+    /// Phone number for pair code linking (Web mode, optional)
+    /// Format: country code + number (e.g., "15551234567")
+    /// If not set, QR code pairing will be used.
+    #[serde(default)]
+    pub pair_phone: Option<String>,
+    /// Custom pair code for linking (Web mode, optional)
+    /// Leave empty to let WhatsApp generate one.
+    #[serde(default)]
+    pub pair_code: Option<String>,
     /// Allowed phone numbers (E.164 format: +1234567890) or "*" for all
     #[serde(default)]
     pub allowed_numbers: Vec<String>,
@@ -2129,6 +2268,29 @@ pub struct LinqConfig {
     /// Allowed sender handles (phone numbers) or "*" for all
     #[serde(default)]
     pub allowed_senders: Vec<String>,
+}
+
+impl WhatsAppConfig {
+    /// Detect which backend to use based on config fields.
+    /// Returns "cloud" if phone_number_id is set, "web" if session_path is set.
+    pub fn backend_type(&self) -> &'static str {
+        if self.phone_number_id.is_some() {
+            "cloud"
+        } else if self.session_path.is_some() {
+            "web"
+        } else {
+            // Default to Cloud API for backward compatibility
+            "cloud"
+        }
+    }
+
+    pub fn is_cloud_config(&self) -> bool {
+        self.phone_number_id.is_some() && self.access_token.is_some() && self.verify_token.is_some()
+    }
+
+    pub fn is_web_config(&self) -> bool {
+        self.session_path.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2376,6 +2538,7 @@ impl Default for Config {
             workspace_dir: redclaw_dir.join("workspace"),
             config_path: redclaw_dir.join("config.toml"),
             api_key: None,
+            api_url: None,
             default_provider: Some("openrouter".to_string()),
             default_model: Some("anthropic/claude-sonnet-4.6".to_string()),
             default_temperature: 0.7,
@@ -2387,8 +2550,10 @@ impl Default for Config {
             scheduler: SchedulerConfig::default(),
             agent: AgentConfig::default(),
             model_routes: Vec::new(),
+            embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig::default(),
+            cron: CronConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -2398,6 +2563,7 @@ impl Default for Config {
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
+            multimodal: MultimodalConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             identity: IdentityConfig::default(),
@@ -2432,13 +2598,15 @@ fn active_workspace_state_path(default_dir: &Path) -> PathBuf {
     default_dir.join(ACTIVE_WORKSPACE_STATE_FILE)
 }
 
-fn load_persisted_workspace_dirs(default_config_dir: &Path) -> Result<Option<(PathBuf, PathBuf)>> {
+async fn load_persisted_workspace_dirs(
+    default_config_dir: &Path,
+) -> Result<Option<(PathBuf, PathBuf)>> {
     let state_path = active_workspace_state_path(default_config_dir);
     if !state_path.exists() {
         return Ok(None);
     }
 
-    let contents = match fs::read_to_string(&state_path) {
+    let contents = match fs::read_to_string(&state_path).await {
         Ok(contents) => contents,
         Err(error) => {
             tracing::warn!(
@@ -2478,13 +2646,13 @@ fn load_persisted_workspace_dirs(default_config_dir: &Path) -> Result<Option<(Pa
     Ok(Some((config_dir.clone(), config_dir.join("workspace"))))
 }
 
-pub(crate) fn persist_active_workspace_config_dir(config_dir: &Path) -> Result<()> {
+pub(crate) async fn persist_active_workspace_config_dir(config_dir: &Path) -> Result<()> {
     let default_config_dir = default_config_dir()?;
     let state_path = active_workspace_state_path(&default_config_dir);
 
     if config_dir == default_config_dir {
         if state_path.exists() {
-            fs::remove_file(&state_path).with_context(|| {
+            fs::remove_file(&state_path).await.with_context(|| {
                 format!(
                     "Failed to clear active workspace marker: {}",
                     state_path.display()
@@ -2494,12 +2662,14 @@ pub(crate) fn persist_active_workspace_config_dir(config_dir: &Path) -> Result<(
         return Ok(());
     }
 
-    fs::create_dir_all(&default_config_dir).with_context(|| {
-        format!(
-            "Failed to create default config directory: {}",
-            default_config_dir.display()
-        )
-    })?;
+    fs::create_dir_all(&default_config_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to create default config directory: {}",
+                default_config_dir.display()
+            )
+        })?;
 
     let state = ActiveWorkspaceState {
         config_dir: config_dir.to_string_lossy().into_owned(),
@@ -2510,57 +2680,118 @@ pub(crate) fn persist_active_workspace_config_dir(config_dir: &Path) -> Result<(
         ".{ACTIVE_WORKSPACE_STATE_FILE}.tmp-{}",
         uuid::Uuid::new_v4()
     ));
-    fs::write(&temp_path, serialized).with_context(|| {
+    fs::write(&temp_path, serialized).await.with_context(|| {
         format!(
             "Failed to write temporary active workspace marker: {}",
             temp_path.display()
         )
     })?;
 
-    if let Err(error) = fs::rename(&temp_path, &state_path) {
-        let _ = fs::remove_file(&temp_path);
+    if let Err(error) = fs::rename(&temp_path, &state_path).await {
+        let _ = fs::remove_file(&temp_path).await;
         anyhow::bail!(
             "Failed to atomically persist active workspace marker {}: {error}",
             state_path.display()
         );
     }
 
-    sync_directory(&default_config_dir)?;
+    sync_directory(&default_config_dir).await?;
     Ok(())
 }
 
-fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.to_path_buf()
+fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf, PathBuf) {
+    // New layout: config root contains config.toml and a nested workspace/.
+    (workspace_dir.to_path_buf(), workspace_dir.join("workspace"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigResolutionSource {
+    EnvWorkspace,
+    ActiveWorkspaceMarker,
+    DefaultConfigDir,
+}
+
+impl ConfigResolutionSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::EnvWorkspace => "REDCLAW_WORKSPACE",
+            Self::ActiveWorkspaceMarker => "active_workspace.toml",
+            Self::DefaultConfigDir => "default",
+        }
+    }
+}
+
+async fn resolve_runtime_config_dirs(
+    default_redclaw_dir: &Path,
+    default_workspace_dir: &Path,
+) -> Result<(PathBuf, PathBuf, ConfigResolutionSource)> {
+    // Resolution priority:
+    // 1. REDCLAW_WORKSPACE env override
+    // 2. Persisted active workspace marker from onboarding/custom profile
+    // 3. Default ~/.redclaw layout
+    if let Ok(custom_workspace) = std::env::var("REDCLAW_WORKSPACE") {
+        if !custom_workspace.is_empty() {
+            let (redclaw_dir, workspace_dir) =
+                resolve_config_dir_for_workspace(&PathBuf::from(custom_workspace));
+            return Ok((
+                redclaw_dir,
+                workspace_dir,
+                ConfigResolutionSource::EnvWorkspace,
+            ));
+        }
+    }
+
+    if let Some((redclaw_dir, workspace_dir)) =
+        load_persisted_workspace_dirs(default_redclaw_dir).await?
+    {
+        return Ok((
+            redclaw_dir,
+            workspace_dir,
+            ConfigResolutionSource::ActiveWorkspaceMarker,
+        ));
+    }
+
+    Ok((
+        default_redclaw_dir.to_path_buf(),
+        default_workspace_dir.to_path_buf(),
+        ConfigResolutionSource::DefaultConfigDir,
+    ))
 }
 
 impl Config {
-    pub fn load_or_init() -> Result<Self> {
+    pub async fn load_or_init() -> Result<Self> {
         // Resolve workspace first so config loading can follow REDCLAW_WORKSPACE.
         let (default_redclaw_dir, default_workspace_dir) = default_config_and_workspace_dirs()?;
-        // Resolution priority:
-        // 1. REDCLAW_WORKSPACE env override
-        // 2. Persisted active workspace marker from onboarding/custom profile
-        // 3. Default ~/.redclaw layout
-        let (redclaw_dir, workspace_dir) = match std::env::var("REDCLAW_WORKSPACE") {
-            Ok(custom_workspace) if !custom_workspace.is_empty() => {
-                let workspace = PathBuf::from(custom_workspace);
-                (resolve_config_dir_for_workspace(&workspace), workspace)
-            }
-            _ => load_persisted_workspace_dirs(&default_redclaw_dir)?
-                .unwrap_or((default_redclaw_dir, default_workspace_dir)),
-        };
+
+        let (redclaw_dir, workspace_dir, resolution_source) =
+            resolve_runtime_config_dirs(&default_redclaw_dir, &default_workspace_dir).await?;
 
         let config_path = redclaw_dir.join("config.toml");
 
-        if !redclaw_dir.exists() {
-            fs::create_dir_all(&redclaw_dir).context("Failed to create config directory")?;
-        }
-        if !workspace_dir.exists() {
-            fs::create_dir_all(&workspace_dir).context("Failed to create workspace directory")?;
-        }
+        fs::create_dir_all(&redclaw_dir)
+            .await
+            .context("Failed to create config directory")?;
+        fs::create_dir_all(&workspace_dir)
+            .await
+            .context("Failed to create workspace directory")?;
 
         if config_path.exists() {
-            let contents = match fs::read_to_string(&config_path) {
+            // Warn if config file is world-readable (may contain API keys)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = fs::metadata(&config_path).await {
+                    if meta.permissions().mode() & 0o004 != 0 {
+                        tracing::warn!(
+                            "Config file {:?} is world-readable (mode {:o}). Consider chmod 600.",
+                            config_path,
+                            meta.permissions().mode() & 0o777
+                        );
+                    }
+                }
+            }
+
+            let contents = match fs::read_to_string(&config_path).await {
                 Ok(contents) => contents,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     crate::rc_bail!(
@@ -2581,19 +2812,95 @@ impl Config {
                     config_path.display()
                 )
             })?;
+
             // Set computed paths that are skipped during serialization
             config.config_path = config_path.clone();
             config.workspace_dir = workspace_dir;
+
             config.apply_env_overrides();
+            config.validate()?;
+
+            tracing::info!(
+                path = %config.config_path.display(),
+                workspace = %config.workspace_dir.display(),
+                source = resolution_source.as_str(),
+                initialized = false,
+                "Config loaded"
+            );
+
             Ok(config)
         } else {
             let mut config = Config::default();
             config.config_path = config_path.clone();
             config.workspace_dir = workspace_dir;
-            config.save()?;
+            config.save().await?;
+
+            // Restrict permissions on newly created config file (may contain API keys)
+            #[cfg(unix)]
+            {
+                use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+                let _ = fs::set_permissions(&config_path, Permissions::from_mode(0o600)).await;
+            }
+
             config.apply_env_overrides();
+            config.validate()?;
+
+            tracing::info!(
+                path = %config.config_path.display(),
+                workspace = %config.workspace_dir.display(),
+                source = resolution_source.as_str(),
+                initialized = true,
+                "Config loaded"
+            );
+
             Ok(config)
         }
+    }
+
+    /// Validate configuration values that would cause runtime failures.
+    pub fn validate(&self) -> Result<()> {
+        if self.gateway.host.trim().is_empty() {
+            anyhow::bail!("gateway.host must not be empty");
+        }
+
+        if self.autonomy.max_actions_per_hour == 0 {
+            anyhow::bail!("autonomy.max_actions_per_hour must be greater than 0");
+        }
+
+        if self.scheduler.max_concurrent == 0 {
+            anyhow::bail!("scheduler.max_concurrent must be greater than 0");
+        }
+
+        if self.scheduler.max_tasks == 0 {
+            anyhow::bail!("scheduler.max_tasks must be greater than 0");
+        }
+
+        for (i, route) in self.model_routes.iter().enumerate() {
+            if route.hint.trim().is_empty() {
+                anyhow::bail!("model_routes[{i}].hint must not be empty");
+            }
+            if route.provider.trim().is_empty() {
+                anyhow::bail!("model_routes[{i}].provider must not be empty");
+            }
+            if route.model.trim().is_empty() {
+                anyhow::bail!("model_routes[{i}].model must not be empty");
+            }
+        }
+
+        for (i, route) in self.embedding_routes.iter().enumerate() {
+            if route.hint.trim().is_empty() {
+                anyhow::bail!("embedding_routes[{i}].hint must not be empty");
+            }
+            if route.provider.trim().is_empty() {
+                anyhow::bail!("embedding_routes[{i}].provider must not be empty");
+            }
+            if route.model.trim().is_empty() {
+                anyhow::bail!("embedding_routes[{i}].model must not be empty");
+            }
+        }
+
+        self.proxy.validate()?;
+        Ok(())
     }
 
     /// Apply environment variable overrides to config
@@ -2602,6 +2909,13 @@ impl Config {
         if let Ok(key) = std::env::var("REDCLAW_API_KEY").or_else(|_| std::env::var("API_KEY")) {
             if !key.is_empty() {
                 self.api_key = Some(key);
+            }
+        }
+
+        // API URL: REDCLAW_API_URL or API_URL
+        if let Ok(url) = std::env::var("REDCLAW_API_URL").or_else(|_| std::env::var("API_URL")) {
+            if !url.is_empty() {
+                self.api_url = Some(url);
             }
         }
         // API Key: GLM_API_KEY overrides when provider is a GLM/Zhipu variant.
@@ -2622,11 +2936,21 @@ impl Config {
             }
         }
 
-        // Provider: REDCLAW_PROVIDER or PROVIDER
-        if let Ok(provider) =
-            std::env::var("REDCLAW_PROVIDER").or_else(|_| std::env::var("PROVIDER"))
-        {
+        // Provider override precedence:
+        // 1) REDCLAW_PROVIDER always wins when set.
+        // 2) Legacy PROVIDER is only honored when config still uses the
+        //    default provider (openrouter) or provider is unset. This prevents
+        //    container defaults from overriding explicit custom providers.
+        if let Ok(provider) = std::env::var("REDCLAW_PROVIDER") {
             if !provider.is_empty() {
+                self.default_provider = Some(provider);
+            }
+        } else if let Ok(provider) = std::env::var("PROVIDER") {
+            let should_apply_legacy_provider =
+                self.default_provider.as_deref().map_or(true, |configured| {
+                    configured.trim().eq_ignore_ascii_case("openrouter")
+                });
+            if should_apply_legacy_provider && !provider.is_empty() {
                 self.default_provider = Some(provider);
             }
         }
@@ -2641,10 +2965,11 @@ impl Config {
         // Workspace directory: REDCLAW_WORKSPACE
         if let Ok(workspace) = std::env::var("REDCLAW_WORKSPACE") {
             if !workspace.is_empty() {
-                let workspace_dir = PathBuf::from(workspace);
-                let config_dir = resolve_config_dir_for_workspace(&workspace_dir);
+                let workspace_root = PathBuf::from(workspace);
+                let (redclaw_dir, workspace_dir) =
+                    resolve_config_dir_for_workspace(&workspace_root);
                 self.workspace_dir = workspace_dir;
-                self.config_path = config_dir.join("config.toml");
+                self.config_path = redclaw_dir.join("config.toml");
             }
         }
 
@@ -2677,9 +3002,21 @@ impl Config {
                 }
             }
         }
+
+        // Reasoning override: REDCLAW_REASONING_ENABLED or REASONING_ENABLED
+        if let Ok(flag) = std::env::var("REDCLAW_REASONING_ENABLED")
+            .or_else(|_| std::env::var("REASONING_ENABLED"))
+        {
+            let normalized = flag.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "1" | "true" | "yes" | "on" => self.runtime.reasoning_enabled = Some(true),
+                "0" | "false" | "no" | "off" => self.runtime.reasoning_enabled = Some(false),
+                _ => {}
+            }
+        }
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub async fn save(&self) -> Result<()> {
         // Encrypt agent API keys before serialization
         let mut config_to_save = self.clone();
         let redclaw_dir = self
@@ -2706,7 +3043,7 @@ impl Config {
             .config_path
             .parent()
             .context("Config path must have a parent directory")?;
-        if let Err(e) = fs::create_dir_all(parent_dir) {
+        if let Err(e) = fs::create_dir_all(parent_dir).await {
             crate::rc_bail!(
                 CONFIG_DIR_CREATE_FAILED,
                 "Failed to create config directory {}: {e}",
@@ -2726,6 +3063,7 @@ impl Config {
             .create_new(true)
             .write(true)
             .open(&temp_path)
+            .await
             .with_context(|| {
                 format!(
                     "Failed to create temporary config file: {}",
@@ -2734,34 +3072,40 @@ impl Config {
             })?;
         temp_file
             .write_all(toml_str.as_bytes())
+            .await
             .context("Failed to write temporary config contents")?;
         temp_file
             .sync_all()
+            .await
             .context("Failed to fsync temporary config file")?;
         drop(temp_file);
 
         let had_existing_config = self.config_path.exists();
         if had_existing_config {
-            fs::copy(&self.config_path, &backup_path).with_context(|| {
-                format!(
-                    "Failed to create config backup before atomic replace: {}",
-                    backup_path.display()
-                )
-            })?;
+            fs::copy(&self.config_path, &backup_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to create config backup before atomic replace: {}",
+                        backup_path.display()
+                    )
+                })?;
         }
 
-        if let Err(e) = fs::rename(&temp_path, &self.config_path) {
-            let _ = fs::remove_file(&temp_path);
+        if let Err(e) = fs::rename(&temp_path, &self.config_path).await {
+            let _ = fs::remove_file(&temp_path).await;
             if had_existing_config && backup_path.exists() {
-                let _ = fs::copy(&backup_path, &self.config_path);
+                fs::copy(&backup_path, &self.config_path)
+                    .await
+                    .context("Failed to restore config backup")?;
             }
             anyhow::bail!("Failed to atomically replace config file: {e}");
         }
 
-        sync_directory(parent_dir)?;
+        sync_directory(parent_dir).await?;
 
         if had_existing_config {
-            let _ = fs::remove_file(&backup_path);
+            let _ = fs::remove_file(&backup_path).await;
         }
 
         Ok(())
@@ -2769,16 +3113,18 @@ impl Config {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
+async fn sync_directory(path: &Path) -> Result<()> {
     let dir = File::open(path)
+        .await
         .with_context(|| format!("Failed to open directory for fsync: {}", path.display()))?;
     dir.sync_all()
+        .await
         .with_context(|| format!("Failed to fsync directory metadata: {}", path.display()))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
+async fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -2900,6 +3246,7 @@ mod tests {
             workspace_dir: PathBuf::from("/tmp/test/workspace"),
             config_path: PathBuf::from("/tmp/test/config.toml"),
             api_key: Some("sk-test-key".into()),
+            api_url: None,
             default_provider: Some("openrouter".into()),
             default_model: Some("gpt-4o".into()),
             default_temperature: 0.5,
@@ -2927,11 +3274,13 @@ mod tests {
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             model_routes: Vec::new(),
+            embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig {
                 enabled: true,
                 interval_minutes: 15,
             },
+            cron: CronConfig::default(),
             channels_config: ChannelsConfig {
                 cli: true,
                 telegram: Some(TelegramConfig {
@@ -2939,6 +3288,7 @@ mod tests {
                     allowed_users: vec!["user1".into()],
                     stream_mode: StreamMode::default(),
                     draft_update_interval_ms: 1000,
+                    interrupt_on_new_message: false,
                     mention_only: false,
                 }),
                 discord: None,
@@ -2965,6 +3315,7 @@ mod tests {
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
+            multimodal: MultimodalConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
@@ -3048,14 +3399,15 @@ tool_dispatcher = "xml"
     #[tokio::test]
     async fn config_save_and_load_tmpdir() {
         let dir = std::env::temp_dir().join("redclaw_test_config");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(&dir).await;
+        fs::create_dir_all(&dir).await.unwrap();
 
         let config_path = dir.join("config.toml");
         let config = Config {
             workspace_dir: dir.join("workspace"),
             config_path: config_path.clone(),
             api_key: Some("sk-roundtrip".into()),
+            api_url: None,
             default_provider: Some("openrouter".into()),
             default_model: Some("test-model".into()),
             default_temperature: 0.9,
@@ -3066,8 +3418,10 @@ tool_dispatcher = "xml"
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             model_routes: Vec::new(),
+            embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig::default(),
+            cron: CronConfig::default(),
             channels_config: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -3077,6 +3431,7 @@ tool_dispatcher = "xml"
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
+            multimodal: MultimodalConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
@@ -3087,7 +3442,7 @@ tool_dispatcher = "xml"
             hardware: HardwareConfig::default(),
         };
 
-        config.save().unwrap();
+        config.save().await.unwrap();
         assert!(config_path.exists());
 
         let contents = tokio::fs::read_to_string(&config_path).await.unwrap();
@@ -3096,14 +3451,14 @@ tool_dispatcher = "xml"
         assert_eq!(loaded.default_model.as_deref(), Some("test-model"));
         assert!((loaded.default_temperature - 0.9).abs() < f64::EPSILON);
 
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn config_save_atomic_cleanup() {
         let dir =
             std::env::temp_dir().join(format!("redclaw_test_config_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).await.unwrap();
 
         let config_path = dir.join("config.toml");
         let mut config = Config::default();
@@ -3111,23 +3466,23 @@ tool_dispatcher = "xml"
         config.config_path = config_path.clone();
         config.default_model = Some("model-a".into());
 
-        config.save().unwrap();
+        config.save().await.unwrap();
         assert!(config_path.exists());
 
         config.default_model = Some("model-b".into());
-        config.save().unwrap();
+        config.save().await.unwrap();
 
         let contents = tokio::fs::read_to_string(&config_path).await.unwrap();
         assert!(contents.contains("model-b"));
 
-        let names: Vec<String> = fs::read_dir(&dir)
+        let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert!(!names.iter().any(|name| name.contains(".tmp-")));
         assert!(!names.iter().any(|name| name.ends_with(".bak")));
 
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir).await;
     }
 
     // ── Telegram / Discord config ────────────────────────────
@@ -3139,6 +3494,7 @@ tool_dispatcher = "xml"
             allowed_users: vec!["alice".into(), "bob".into()],
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,
+            interrupt_on_new_message: false,
             mention_only: false,
         };
         let json = serde_json::to_string(&tc).unwrap();
@@ -3407,32 +3763,38 @@ channel_id = "C123"
     #[test]
     fn whatsapp_config_serde() {
         let wc = WhatsAppConfig {
-            access_token: "EAABx...".into(),
-            phone_number_id: "123456789".into(),
-            verify_token: "my-verify-token".into(),
+            access_token: Some("EAABx...".into()),
+            phone_number_id: Some("123456789".into()),
+            verify_token: Some("my-verify-token".into()),
             app_secret: None,
+            session_path: None,
+            pair_phone: None,
+            pair_code: None,
             allowed_numbers: vec!["+1234567890".into(), "+9876543210".into()],
         };
         let json = serde_json::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.access_token, "EAABx...");
-        assert_eq!(parsed.phone_number_id, "123456789");
-        assert_eq!(parsed.verify_token, "my-verify-token");
+        assert_eq!(parsed.access_token.as_deref(), Some("EAABx..."));
+        assert_eq!(parsed.phone_number_id.as_deref(), Some("123456789"));
+        assert_eq!(parsed.verify_token.as_deref(), Some("my-verify-token"));
         assert_eq!(parsed.allowed_numbers.len(), 2);
     }
 
     #[test]
     fn whatsapp_config_toml_roundtrip() {
         let wc = WhatsAppConfig {
-            access_token: "tok".into(),
-            phone_number_id: "12345".into(),
-            verify_token: "verify".into(),
+            access_token: Some("tok".into()),
+            phone_number_id: Some("12345".into()),
+            verify_token: Some("verify".into()),
             app_secret: Some("secret123".into()),
+            session_path: None,
+            pair_phone: None,
+            pair_code: None,
             allowed_numbers: vec!["+1".into()],
         };
         let toml_str = toml::to_string(&wc).unwrap();
         let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.phone_number_id, "12345");
+        assert_eq!(parsed.phone_number_id.as_deref(), Some("12345"));
         assert_eq!(parsed.allowed_numbers, vec!["+1"]);
     }
 
@@ -3446,10 +3808,13 @@ channel_id = "C123"
     #[test]
     fn whatsapp_config_wildcard_allowed() {
         let wc = WhatsAppConfig {
-            access_token: "tok".into(),
-            phone_number_id: "123".into(),
-            verify_token: "ver".into(),
+            access_token: Some("tok".into()),
+            phone_number_id: Some("123".into()),
+            verify_token: Some("ver".into()),
             app_secret: None,
+            session_path: None,
+            pair_phone: None,
+            pair_code: None,
             allowed_numbers: vec!["*".into()],
         };
         let toml_str = toml::to_string(&wc).unwrap();
@@ -3470,10 +3835,13 @@ channel_id = "C123"
             matrix: None,
             signal: None,
             whatsapp: Some(WhatsAppConfig {
-                access_token: "tok".into(),
-                phone_number_id: "123".into(),
-                verify_token: "ver".into(),
+                access_token: Some("tok".into()),
+                phone_number_id: Some("123".into()),
+                verify_token: Some("ver".into()),
                 app_secret: None,
+                session_path: None,
+                pair_phone: None,
+                pair_code: None,
                 allowed_numbers: vec!["+1".into()],
             }),
             linq: None,
@@ -3488,7 +3856,7 @@ channel_id = "C123"
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.whatsapp.is_some());
         let wa = parsed.whatsapp.unwrap();
-        assert_eq!(wa.phone_number_id, "123");
+        assert_eq!(wa.phone_number_id.as_deref(), Some("123"));
         assert_eq!(wa.allowed_numbers, vec!["+1"]);
     }
 
@@ -3891,25 +4259,29 @@ default_temperature = 0.7
         std::env::remove_var("MODEL");
     }
 
-    #[test]
-    fn load_or_init_uses_persisted_active_workspace_marker() {
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_or_init_uses_persisted_active_workspace_marker() {
         let _env_guard = env_override_test_guard();
         let temp_home =
             std::env::temp_dir().join(format!("redclaw_test_home_{}", uuid::Uuid::new_v4()));
         let custom_config_dir = temp_home.join("profiles").join("agent-alpha");
-        fs::create_dir_all(&custom_config_dir).unwrap();
+        fs::create_dir_all(&custom_config_dir).await.unwrap();
         fs::write(
             custom_config_dir.join("config.toml"),
             "default_temperature = 0.7\ndefault_model = \"persisted-profile\"\n",
         )
+        .await
         .unwrap();
 
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
         std::env::remove_var("REDCLAW_WORKSPACE");
 
-        persist_active_workspace_config_dir(&custom_config_dir).unwrap();
-        let config = Config::load_or_init().unwrap();
+        persist_active_workspace_config_dir(&custom_config_dir)
+            .await
+            .unwrap();
+        let config = Config::load_or_init().await.unwrap();
 
         assert_eq!(config.config_path, custom_config_dir.join("config.toml"));
         assert_eq!(config.workspace_dir, custom_config_dir.join("workspace"));
@@ -3920,32 +4292,36 @@ default_temperature = 0.7
         } else {
             std::env::remove_var("HOME");
         }
-        let _ = fs::remove_dir_all(temp_home);
+        let _ = fs::remove_dir_all(temp_home).await;
     }
 
-    #[test]
-    fn load_or_init_env_workspace_override_takes_priority_over_marker() {
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_or_init_env_workspace_override_takes_priority_over_marker() {
         let _env_guard = env_override_test_guard();
         let temp_home =
             std::env::temp_dir().join(format!("redclaw_test_home_{}", uuid::Uuid::new_v4()));
         let marker_config_dir = temp_home.join("profiles").join("persisted-profile");
         let env_workspace_dir = temp_home.join("env-workspace");
 
-        fs::create_dir_all(&marker_config_dir).unwrap();
+        fs::create_dir_all(&marker_config_dir).await.unwrap();
         fs::write(
             marker_config_dir.join("config.toml"),
             "default_temperature = 0.7\ndefault_model = \"marker-model\"\n",
         )
+        .await
         .unwrap();
 
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
-        persist_active_workspace_config_dir(&marker_config_dir).unwrap();
+        persist_active_workspace_config_dir(&marker_config_dir)
+            .await
+            .unwrap();
         std::env::set_var("REDCLAW_WORKSPACE", &env_workspace_dir);
 
-        let config = Config::load_or_init().unwrap();
+        let config = Config::load_or_init().await.unwrap();
 
-        assert_eq!(config.workspace_dir, env_workspace_dir);
+        assert_eq!(config.workspace_dir, env_workspace_dir.join("workspace"));
         assert_eq!(config.config_path, env_workspace_dir.join("config.toml"));
 
         std::env::remove_var("REDCLAW_WORKSPACE");
@@ -3954,11 +4330,12 @@ default_temperature = 0.7
         } else {
             std::env::remove_var("HOME");
         }
-        let _ = fs::remove_dir_all(temp_home);
+        let _ = fs::remove_dir_all(temp_home).await;
     }
 
-    #[test]
-    fn persist_active_workspace_marker_is_cleared_for_default_config_dir() {
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn persist_active_workspace_marker_is_cleared_for_default_config_dir() {
         let _env_guard = env_override_test_guard();
         let temp_home =
             std::env::temp_dir().join(format!("redclaw_test_home_{}", uuid::Uuid::new_v4()));
@@ -3969,10 +4346,14 @@ default_temperature = 0.7
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
 
-        persist_active_workspace_config_dir(&custom_config_dir).unwrap();
+        persist_active_workspace_config_dir(&custom_config_dir)
+            .await
+            .unwrap();
         assert!(marker_path.exists());
 
-        persist_active_workspace_config_dir(&default_config_dir).unwrap();
+        persist_active_workspace_config_dir(&default_config_dir)
+            .await
+            .unwrap();
         assert!(!marker_path.exists());
 
         if let Some(home) = original_home {
@@ -3980,7 +4361,7 @@ default_temperature = 0.7
         } else {
             std::env::remove_var("HOME");
         }
-        let _ = fs::remove_dir_all(temp_home);
+        let _ = fs::remove_dir_all(temp_home).await;
     }
 
     #[test]
@@ -3990,7 +4371,10 @@ default_temperature = 0.7
 
         std::env::set_var("REDCLAW_WORKSPACE", "/custom/workspace");
         config.apply_env_overrides();
-        assert_eq!(config.workspace_dir, PathBuf::from("/custom/workspace"));
+        assert_eq!(
+            config.workspace_dir,
+            PathBuf::from("/custom/workspace").join("workspace")
+        );
 
         std::env::remove_var("REDCLAW_WORKSPACE");
     }
