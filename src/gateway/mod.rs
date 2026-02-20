@@ -10,7 +10,7 @@
 use crate::channels::{Channel, LinqChannel, SendMessage, WhatsAppChannel};
 use crate::config::Config;
 use crate::memory::{self, Memory, MemoryCategory};
-use crate::providers::{self, Provider};
+use crate::providers::{self, ChatMessage, Provider, ProviderCapabilityError};
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
@@ -303,6 +303,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider(
         config.default_provider.as_deref().unwrap_or("openrouter"),
         config.api_key.as_deref(),
+        None,
         &config.reliability,
     )?);
     let model = config
@@ -329,13 +330,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 
     // WhatsApp channel (if configured)
     let whatsapp_channel: Option<Arc<WhatsAppChannel>> =
-        config.channels_config.whatsapp.as_ref().map(|wa| {
-            Arc::new(WhatsAppChannel::new(
-                wa.access_token.clone(),
-                wa.phone_number_id.clone(),
-                wa.verify_token.clone(),
+        config.channels_config.whatsapp.as_ref().and_then(|wa| {
+            Some(Arc::new(WhatsAppChannel::new(
+                wa.access_token.clone()?,
+                wa.phone_number_id.clone()?,
+                wa.verify_token.clone()?,
                 wa.allowed_numbers.clone(),
-            ))
+            )))
         });
 
     // WhatsApp app secret for webhook signature verification
@@ -570,6 +571,7 @@ async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// POST /pair — exchange one-time code for bearer token
+#[axum::debug_handler]
 async fn handle_pair(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -591,11 +593,11 @@ async fn handle_pair(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    match state.pairing.try_pair(code) {
+    match state.pairing.try_pair(code, &rate_key).await {
         Ok(Some(token)) => {
             tracing::info!("🔐 New client paired successfully");
 
-            if let Err(err) = persist_pairing_tokens(&state.config, &state.pairing) {
+            if let Err(err) = persist_pairing_tokens(state.config.clone(), &state.pairing).await {
                 tracing::error!("🔐 Pairing succeeded but token persistence failed: {err:#}");
                 let body = serde_json::json!({
                     "paired": true,
@@ -632,12 +634,66 @@ async fn handle_pair(
     }
 }
 
-fn persist_pairing_tokens(config: &Arc<Mutex<Config>>, pairing: &PairingGuard) -> Result<()> {
+async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGuard) -> Result<()> {
     let paired_tokens = pairing.tokens();
-    let mut cfg = config.lock();
-    cfg.gateway.paired_tokens = paired_tokens;
-    cfg.save()
-        .context("Failed to persist paired tokens to config.toml")
+    // This is needed because parking_lot's guard is not Send so we clone the inner
+    // this should be removed once async mutexes are used everywhere
+    let mut updated_cfg = { config.lock().clone() };
+    updated_cfg.gateway.paired_tokens = paired_tokens;
+    updated_cfg
+        .save()
+        .await
+        .context("Failed to persist paired tokens to config.toml")?;
+
+    // Keep shared runtime config in sync with persisted tokens.
+    *config.lock() = updated_cfg;
+    Ok(())
+}
+
+async fn run_gateway_chat_with_multimodal(
+    state: &AppState,
+    provider_label: &str,
+    message: &str,
+) -> anyhow::Result<String> {
+    let user_messages = vec![ChatMessage::user(message)];
+    let image_marker_count = crate::multimodal::count_image_markers(&user_messages);
+    if image_marker_count > 0 && !state.provider.supports_vision() {
+        return Err(ProviderCapabilityError {
+            provider: provider_label.to_string(),
+            capability: "vision".to_string(),
+            message: format!(
+                "received {image_marker_count} image marker(s), but this provider does not support vision input"
+            ),
+        }
+        .into());
+    }
+
+    // Keep webhook/gateway prompts aligned with channel behavior by injecting
+    // workspace-aware system context before model invocation.
+    let system_prompt = {
+        let config_guard = state.config.lock();
+        crate::channels::build_system_prompt(
+            &config_guard.workspace_dir,
+            &state.model,
+            &[], // tools - empty for simple chat
+            &[], // skills
+            Some(&config_guard.identity),
+            None, // bootstrap_max_chars - use default
+        )
+    };
+
+    let mut messages = Vec::with_capacity(1 + user_messages.len());
+    messages.push(ChatMessage::system(system_prompt));
+    messages.extend(user_messages);
+
+    let multimodal_config = state.config.lock().multimodal.clone();
+    let prepared =
+        crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config).await?;
+
+    state
+        .provider
+        .chat_with_history(&prepared.messages, &state.model, state.temperature)
+        .await
 }
 
 /// Webhook request body
@@ -758,11 +814,7 @@ async fn handle_webhook(
             messages_count: 1,
         });
 
-    match state
-        .provider
-        .simple_chat(message, &state.model, state.temperature)
-        .await
-    {
+    match run_gateway_chat_with_multimodal(&state, &provider_label, message).await {
         Ok(response) => {
             let duration = started_at.elapsed();
             state
@@ -946,6 +998,12 @@ async fn handle_whatsapp_message(
     }
 
     // Process each message
+    let provider_label = state
+        .config
+        .lock()
+        .default_provider
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
     for msg in &messages {
         tracing::info!(
             "WhatsApp message from {}: {}",
@@ -962,12 +1020,7 @@ async fn handle_whatsapp_message(
                 .await;
         }
 
-        // Call the LLM
-        match state
-            .provider
-            .simple_chat(&msg.content, &state.model, state.temperature)
-            .await
-        {
+        match run_gateway_chat_with_multimodal(&state, &provider_label, &msg.content).await {
             Ok(response) => {
                 // Send reply via WhatsApp
                 if let Err(e) = wa
@@ -1058,6 +1111,12 @@ async fn handle_linq_webhook(
     }
 
     // Process each message
+    let provider_label = state
+        .config
+        .lock()
+        .default_provider
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
     for msg in &messages {
         tracing::info!(
             "Linq message from {}: {}",
@@ -1075,11 +1134,7 @@ async fn handle_linq_webhook(
         }
 
         // Call the LLM
-        match state
-            .provider
-            .simple_chat(&msg.content, &state.model, state.temperature)
-            .await
-        {
+        match run_gateway_chat_with_multimodal(&state, &provider_label, &msg.content).await {
             Ok(response) => {
                 // Send reply via Linq
                 if let Err(e) = linq
@@ -1379,15 +1434,17 @@ mod tests {
         let mut config = Config::default();
         config.config_path = config_path.clone();
         config.workspace_dir = workspace_path;
-        config.save().unwrap();
+        config.save().await.unwrap();
 
         let guard = PairingGuard::new(true, &[]);
         let code = guard.pairing_code().unwrap();
-        let token = guard.try_pair(&code).unwrap().unwrap();
+        let token = guard.try_pair(&code, "test_client").await.unwrap().unwrap();
         assert!(guard.is_authenticated(&token));
 
         let shared_config = Arc::new(Mutex::new(config));
-        persist_pairing_tokens(&shared_config, &guard).unwrap();
+        persist_pairing_tokens(shared_config.clone(), &guard)
+            .await
+            .unwrap();
 
         let saved = tokio::fs::read_to_string(config_path).await.unwrap();
         let parsed: Config = toml::from_str(&saved).unwrap();
@@ -1395,6 +1452,10 @@ mod tests {
         let persisted = &parsed.gateway.paired_tokens[0];
         assert_eq!(persisted.len(), 64);
         assert!(persisted.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let in_memory = shared_config.lock();
+        assert_eq!(in_memory.gateway.paired_tokens.len(), 1);
+        assert_eq!(&in_memory.gateway.paired_tokens[0], persisted);
     }
 
     #[test]
@@ -1416,6 +1477,7 @@ mod tests {
             content: "hello".into(),
             channel: "whatsapp".into(),
             timestamp: 1,
+            thread_ts: None,
         };
 
         let key = whatsapp_memory_key(&msg);
@@ -1844,5 +1906,53 @@ mod tests {
             body,
             &signature_header
         ));
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // IdempotencyStore Edge-Case Tests
+    // ══════════════════════════════════════════════════════════
+
+    #[test]
+    fn idempotency_store_allows_different_keys() {
+        let store = IdempotencyStore::new(Duration::from_secs(60), 100);
+        assert!(store.record_if_new("key-a"));
+        assert!(store.record_if_new("key-b"));
+        assert!(store.record_if_new("key-c"));
+        assert!(store.record_if_new("key-d"));
+    }
+
+    #[test]
+    fn idempotency_store_max_keys_clamped_to_one() {
+        let store = IdempotencyStore::new(Duration::from_secs(60), 0);
+        assert!(store.record_if_new("only-key"));
+        assert!(!store.record_if_new("only-key"));
+    }
+
+    #[test]
+    fn idempotency_store_rapid_duplicate_rejected() {
+        let store = IdempotencyStore::new(Duration::from_secs(300), 100);
+        assert!(store.record_if_new("rapid"));
+        assert!(!store.record_if_new("rapid"));
+    }
+
+    #[test]
+    fn idempotency_store_accepts_after_ttl_expires() {
+        let store = IdempotencyStore::new(Duration::from_millis(1), 100);
+        assert!(store.record_if_new("ttl-key"));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(store.record_if_new("ttl-key"));
+    }
+
+    #[test]
+    fn idempotency_store_eviction_preserves_newest() {
+        let store = IdempotencyStore::new(Duration::from_secs(300), 1);
+        assert!(store.record_if_new("old-key"));
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(store.record_if_new("new-key"));
+
+        let keys = store.keys.lock();
+        assert_eq!(keys.len(), 1);
+        assert!(!keys.contains_key("old-key"));
+        assert!(keys.contains_key("new-key"));
     }
 }
