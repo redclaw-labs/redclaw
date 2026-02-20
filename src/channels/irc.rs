@@ -163,12 +163,17 @@ fn split_message(message: &str, max_bytes: usize) -> Vec<String> {
 
     // Guard against max_bytes == 0 to prevent infinite loop
     if max_bytes == 0 {
-        let full: String = message
+        let mut full = String::new();
+        for l in message
             .lines()
             .map(|l| l.trim_end_matches('\r'))
             .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        {
+            if !full.is_empty() {
+                full.push(' ');
+            }
+            full.push_str(l);
+        }
         if full.is_empty() {
             chunks.push(String::new());
         } else {
@@ -567,6 +572,7 @@ impl Channel for IrcChannel {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
+                        thread_ts: None,
                     };
 
                     if tx.send(channel_msg).await.is_err() {

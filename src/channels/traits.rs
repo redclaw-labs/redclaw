@@ -11,6 +11,9 @@ pub struct ChannelMessage {
     pub content: String,
     pub channel: String,
     pub timestamp: u64,
+    /// Platform thread identifier (e.g. Slack `ts`, Discord thread ID).
+    /// When set, replies should be posted as threaded responses.
+    pub thread_ts: Option<String>,
 }
 
 /// A message to send via a channel (content + platform-specific recipient target)
@@ -19,6 +22,8 @@ pub struct SendMessage {
     pub content: String,
     pub recipient: String,
     pub subject: Option<String>,
+    /// Platform thread identifier for threaded replies (e.g. Slack `thread_ts`).
+    pub thread_ts: Option<String>,
 }
 
 impl SendMessage {
@@ -27,11 +32,31 @@ impl SendMessage {
             content: content.into(),
             recipient: recipient.into(),
             subject: None,
+            thread_ts: None,
+        }
+    }
+
+    pub fn new_with_subject(
+        content: impl Into<String>,
+        recipient: impl Into<String>,
+        subject: impl Into<String>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            recipient: recipient.into(),
+            subject: Some(subject.into()),
+            thread_ts: None,
         }
     }
 
     pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
         self.subject = Some(subject.into());
+        self
+    }
+
+    /// Set the thread identifier for threaded replies.
+    pub fn in_thread(mut self, thread_ts: Option<String>) -> Self {
+        self.thread_ts = thread_ts;
         self
     }
 }
@@ -93,6 +118,11 @@ pub trait Channel: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Cancel and remove a previously sent draft message if the channel supports it.
+    async fn cancel_draft(&self, _recipient: &str, _message_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +152,7 @@ mod tests {
                 content: "hello".into(),
                 channel: "dummy".into(),
                 timestamp: 123,
+                thread_ts: None,
             })
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))
@@ -137,6 +168,7 @@ mod tests {
             content: "ping".into(),
             channel: "dummy".into(),
             timestamp: 999,
+            thread_ts: None,
         };
 
         let cloned = message.clone();
@@ -175,6 +207,7 @@ mod tests {
             .finalize_draft("bob", "msg_1", "final text")
             .await
             .is_ok());
+        assert!(channel.cancel_draft("bob", "msg_1").await.is_ok());
     }
 
     #[tokio::test]
