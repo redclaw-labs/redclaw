@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use directories::UserDirs;
 use parking_lot::Mutex;
 use reqwest::multipart::{Form, Part};
-use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::fs;
 
 /// Telegram's maximum message length for text messages
 const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
@@ -18,7 +18,7 @@ const TELEGRAM_BIND_COMMAND: &str = "/bind";
 /// Split a message into chunks that respect Telegram's 4096 character limit.
 /// Tries to split at word boundaries when possible, and handles continuation.
 fn split_message_for_telegram(message: &str) -> Vec<String> {
-    if message.len() <= TELEGRAM_MAX_MESSAGE_LENGTH {
+    if message.chars().count() <= TELEGRAM_MAX_MESSAGE_LENGTH {
         return vec![message.to_string()];
     }
 
@@ -26,29 +26,32 @@ fn split_message_for_telegram(message: &str) -> Vec<String> {
     let mut remaining = message;
 
     while !remaining.is_empty() {
-        let chunk_end = if remaining.len() <= TELEGRAM_MAX_MESSAGE_LENGTH {
-            remaining.len()
+        // Find the byte offset for the Nth character boundary.
+        let hard_split = remaining
+            .char_indices()
+            .nth(TELEGRAM_MAX_MESSAGE_LENGTH)
+            .map_or(remaining.len(), |(idx, _)| idx);
+
+        let chunk_end = if hard_split == remaining.len() {
+            hard_split
         } else {
             // Try to find a good break point (newline, then space)
-            let search_area = &remaining[..TELEGRAM_MAX_MESSAGE_LENGTH];
+            let search_area = &remaining[..hard_split];
 
             // Prefer splitting at newline
             if let Some(pos) = search_area.rfind('\n') {
                 // Don't split if the newline is too close to the start
-                if pos >= TELEGRAM_MAX_MESSAGE_LENGTH / 2 {
+                if search_area[..pos].chars().count() >= TELEGRAM_MAX_MESSAGE_LENGTH / 2 {
                     pos + 1
                 } else {
                     // Try space as fallback
-                    search_area
-                        .rfind(' ')
-                        .unwrap_or(TELEGRAM_MAX_MESSAGE_LENGTH)
-                        + 1
+                    search_area.rfind(' ').unwrap_or(hard_split) + 1
                 }
             } else if let Some(pos) = search_area.rfind(' ') {
                 pos + 1
             } else {
-                // Hard split at the limit
-                TELEGRAM_MAX_MESSAGE_LENGTH
+                // Hard split at character boundary
+                hard_split
             }
         };
 
@@ -333,7 +336,7 @@ impl TelegramChannel {
             .collect()
     }
 
-    fn load_config_without_env() -> anyhow::Result<Config> {
+    async fn load_config_without_env() -> anyhow::Result<Config> {
         let home = UserDirs::new()
             .map(|u| u.home_dir().to_path_buf())
             .context("Could not find home directory")?;
@@ -341,18 +344,24 @@ impl TelegramChannel {
         let config_path = redclaw_dir.join("config.toml");
 
         let contents = fs::read_to_string(&config_path)
+            .await
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-        let mut config: Config = toml::from_str(&contents)
-            .context("Failed to parse config file for Telegram binding")?;
+        let mut config: Config = toml::from_str(&contents).context(
+            "Failed to parse config.toml — check [channels.telegram] section for syntax errors",
+        )?;
         config.config_path = config_path;
         config.workspace_dir = redclaw_dir.join("workspace");
         Ok(config)
     }
 
-    fn persist_allowed_identity_blocking(identity: &str) -> anyhow::Result<()> {
-        let mut config = Self::load_config_without_env()?;
+    async fn persist_allowed_identity(&self, identity: &str) -> anyhow::Result<()> {
+        let mut config = Self::load_config_without_env().await?;
         let Some(telegram) = config.channels_config.telegram.as_mut() else {
-            anyhow::bail!("Telegram channel config is missing in config.toml");
+            anyhow::bail!(
+                "Missing [channels.telegram] section in config.toml. \
+                Add bot_token and allowed_users under [channels.telegram], \
+                or run `redclaw onboard --channels-only` to configure interactively"
+            );
         };
 
         let normalized = Self::normalize_identity(identity);
@@ -364,17 +373,10 @@ impl TelegramChannel {
             telegram.allowed_users.push(normalized);
             config
                 .save()
+                .await
                 .context("Failed to persist Telegram allowlist to config.toml")?;
         }
 
-        Ok(())
-    }
-
-    async fn persist_allowed_identity(&self, identity: &str) -> anyhow::Result<()> {
-        let identity = identity.to_string();
-        tokio::task::spawn_blocking(move || Self::persist_allowed_identity_blocking(&identity))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to join Telegram bind save task: {e}"))??;
         Ok(())
     }
 
@@ -624,6 +626,7 @@ impl TelegramChannel {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            thread_ts: None,
         })
     }
 
@@ -672,7 +675,7 @@ impl TelegramChannel {
 
         if let Some(code) = Self::extract_bind_code(text) {
             if let Some(pairing) = self.pairing.as_ref() {
-                match pairing.try_pair(code) {
+                match pairing.try_pair(code, &chat_id).await {
                     Ok(Some(_token)) => {
                         let bind_identity = normalized_sender_id.clone().or_else(|| {
                             if normalized_username.is_empty() || normalized_username == "unknown" {
@@ -737,7 +740,7 @@ impl TelegramChannel {
             } else {
                 let _ = self
                     .send(&SendMessage::new(
-                        "ℹ️ Telegram pairing is not active. Ask operator to update allowlist in config.toml.",
+                        "ℹ️ Telegram pairing is not active. Ask operator to add your user ID to channels.telegram.allowed_users in config.toml.",
                         &chat_id,
                     ))
                     .await;
@@ -1367,6 +1370,37 @@ impl Channel for TelegramChannel {
             .await
     }
 
+    async fn cancel_draft(&self, recipient: &str, message_id: &str) -> anyhow::Result<()> {
+        let (chat_id, _) = Self::parse_reply_target(recipient);
+        self.last_draft_edit.lock().remove(&chat_id);
+
+        let message_id = match message_id.parse::<i64>() {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::debug!("Invalid Telegram draft message_id '{message_id}': {e}");
+                return Ok(());
+            }
+        };
+
+        let response = self
+            .http_client()
+            .post(self.api_url("deleteMessage"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::debug!("Telegram deleteMessage failed ({status}): {body}");
+        }
+
+        Ok(())
+    }
+
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let content = strip_tool_call_tags(&message.content);
         let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
@@ -1522,7 +1556,7 @@ Ensure only one `redclaw` process is using this bot token."
                         .and_then(serde_json::Value::as_i64)
                         .map(|id| id.to_string());
 
-                    let reply_target = if let Some(tid) = thread_id {
+                    let reply_target = if let Some(tid) = thread_id.as_deref() {
                         format!("{}:{}", chat_id, tid)
                     } else {
                         chat_id.clone()
@@ -1550,6 +1584,7 @@ Ensure only one `redclaw` process is using this bot token."
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
+                        thread_ts: thread_id,
                     };
 
                     if tx.send(msg).await.is_err() {
@@ -2491,5 +2526,107 @@ mod tests {
 
         let ch_disabled = TelegramChannel::new("token".into(), vec!["*".into()], false);
         assert!(!ch_disabled.mention_only);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TG6: Channel platform limit edge cases for Telegram (4096 char limit)
+    // Prevents: Pattern 6 — issues #574, #499
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn telegram_split_code_block_at_boundary() {
+        let mut msg = String::new();
+        msg.push_str("```python\n");
+        msg.push_str(&"x".repeat(4085));
+        msg.push_str("\n```\nMore text after code block");
+        let parts = split_message_for_telegram(&msg);
+        assert!(
+            parts.len() >= 2,
+            "code block spanning boundary should split"
+        );
+        for part in &parts {
+            assert!(
+                part.len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "each part must be <= {TELEGRAM_MAX_MESSAGE_LENGTH}, got {}",
+                part.len()
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_split_single_long_word() {
+        let long_word = "a".repeat(5000);
+        let parts = split_message_for_telegram(&long_word);
+        assert!(parts.len() >= 2, "word exceeding limit must be split");
+        for part in &parts {
+            assert!(
+                part.len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "hard-split part must be <= {TELEGRAM_MAX_MESSAGE_LENGTH}, got {}",
+                part.len()
+            );
+        }
+        let reassembled: String = parts.join("");
+        assert_eq!(reassembled, long_word);
+    }
+
+    #[test]
+    fn telegram_split_exactly_at_limit_no_split() {
+        let msg = "a".repeat(TELEGRAM_MAX_MESSAGE_LENGTH);
+        let parts = split_message_for_telegram(&msg);
+        assert_eq!(parts.len(), 1, "message exactly at limit should not split");
+    }
+
+    #[test]
+    fn telegram_split_one_over_limit() {
+        let msg = "a".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 1);
+        let parts = split_message_for_telegram(&msg);
+        assert!(parts.len() >= 2, "message 1 char over limit must split");
+    }
+
+    #[test]
+    fn telegram_split_many_short_lines() {
+        let mut msg = String::new();
+        for i in 0..1000 {
+            let _ = std::fmt::Write::write_fmt(&mut msg, format_args!("line {i}\n"));
+        }
+        let parts = split_message_for_telegram(&msg);
+        for part in &parts {
+            assert!(
+                part.len() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "short-line batch must be <= limit"
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_split_only_whitespace() {
+        let msg = "   \n\n\t  ";
+        let parts = split_message_for_telegram(msg);
+        assert!(parts.len() <= 1);
+    }
+
+    #[test]
+    fn telegram_split_emoji_at_boundary() {
+        let mut msg = "a".repeat(4094);
+        msg.push_str("🎉🎊"); // 4096 chars total
+        let parts = split_message_for_telegram(&msg);
+        for part in &parts {
+            // The function splits on character count, not byte count
+            assert!(
+                part.chars().count() <= TELEGRAM_MAX_MESSAGE_LENGTH,
+                "emoji boundary split must respect limit"
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_split_consecutive_newlines() {
+        let mut msg = "a".repeat(4090);
+        msg.push_str("\n\n\n\n\n\n");
+        msg.push_str(&"b".repeat(100));
+        let parts = split_message_for_telegram(&msg);
+        for part in &parts {
+            assert!(part.len() <= TELEGRAM_MAX_MESSAGE_LENGTH);
+        }
     }
 }
