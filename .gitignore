@@ -5,6 +5,7 @@ firmware/*/target
 *.log
 .env
 .DS_Store
+._*
 *.swp
 *.swo
 .wt-pr37/
