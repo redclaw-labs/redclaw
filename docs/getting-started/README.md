@@ -8,6 +8,15 @@ For first-time setup and quick orientation.
 2. One-click setup and dual bootstrap mode: [../one-click-bootstrap.md](../one-click-bootstrap.md)
 3. Find commands by tasks: [../commands-reference.md](../commands-reference.md)
 
+## Choose Your Path
+
+| Scenario | Command |
+|----------|---------|
+| I have an API key, want fastest setup | `redclaw onboard --api-key sk-... --provider openrouter` |
+| I want guided prompts | `redclaw onboard --interactive` |
+| Config exists, just fix channels | `redclaw onboard --channels-only` |
+| Using subscription auth | See [Subscription Auth](../../README.md#subscription-auth-openai-codex--claude-code) |
+
 ## Onboarding and Validation
 
 - Quick onboarding: `redclaw onboard --api-key "sk-..." --provider openrouter`

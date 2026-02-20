@@ -4,6 +4,12 @@ This page defines the fastest supported path to install and initialize RedClaw.
 
 Last verified: **February 18, 2026**.
 
+## Option 0: Homebrew (macOS/Linuxbrew)
+
+```bash
+brew install redclaw
+```
+
 ## Option A (Recommended): Clone + local script
 
 ```bash

@@ -122,7 +122,15 @@ Battle-hardened AI agent runtime built in Rust. High performance, high security,
 - Security policy (SECURITY.md)
 - Code of Conduct (CODE_OF_CONDUCT.md)
 
+### Fixed
+- **Onboarding channel menu dispatch** now uses an enum-backed selector instead of hard-coded
+	numeric match arms, preventing duplicated pattern arms and related `unreachable pattern`
+	compiler warnings in `src/onboard/wizard.rs`.
+- **OpenAI native tool spec parsing** now uses owned serializable/deserializable structs,
+	fixing a compile-time type mismatch when validating tool schemas before API calls.
+
 ### Performance
 - ~8MB release binary (macOS arm64 build)
 
 [1.0.0]: https://github.com/redclaw-labs/redclaw/releases/tag/v1.0.0
+

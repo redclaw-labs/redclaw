@@ -102,6 +102,8 @@ Runtime in-chat commands (Telegram/Discord while channel server is running):
 - `redclaw skills install <source>`
 - `redclaw skills remove <name>`
 
+Skill manifests (`SKILL.toml`) support `prompts` and `[[tools]]`; both are injected into the agent system prompt at runtime, so the model can follow skill instructions without manually reading skill files.
+
 ### `migrate`
 
 - `redclaw migrate openclaw [--source <path>] [--dry-run]`
