@@ -2,9 +2,16 @@ use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_tungstenite::tungstenite::Message as WsMsg;
 use uuid::Uuid;
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
+
+/// Returns true when the WebSocket frame indicates live traffic that should
+/// refresh the heartbeat watchdog.
+fn should_refresh_last_recv(msg: &WsMsg) -> bool {
+    matches!(msg, WsMsg::Binary(_) | WsMsg::Ping(_) | WsMsg::Pong(_))
+}
 
 /// Lark/Feishu channel — receives events via HTTP callback, sends via Open API
 pub struct LarkChannel {
@@ -180,6 +187,7 @@ impl LarkChannel {
             content: text,
             channel: "lark".to_string(),
             timestamp,
+            thread_ts: None,
         });
 
         messages
@@ -333,6 +341,21 @@ mod tests {
     fn lark_channel_name() {
         let ch = make_channel();
         assert_eq!(ch.name(), "lark");
+    }
+
+    #[test]
+    fn lark_ws_activity_refreshes_heartbeat_watchdog() {
+        assert!(should_refresh_last_recv(&WsMsg::Binary(
+            vec![1, 2, 3].into()
+        )));
+        assert!(should_refresh_last_recv(&WsMsg::Ping(vec![9, 9].into())));
+        assert!(should_refresh_last_recv(&WsMsg::Pong(vec![8, 8].into())));
+    }
+
+    #[test]
+    fn lark_ws_non_activity_frames_do_not_refresh_heartbeat_watchdog() {
+        assert!(!should_refresh_last_recv(&WsMsg::Text("hello".into())));
+        assert!(!should_refresh_last_recv(&WsMsg::Close(None)));
     }
 
     #[test]
