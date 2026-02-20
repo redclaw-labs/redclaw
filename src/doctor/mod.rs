@@ -852,9 +852,9 @@ fn check_channels(config: &Config) -> Vec<CheckResult> {
 
     if let Some(wa) = cfg.whatsapp.as_ref() {
         out.push(
-            if non_empty(&wa.access_token)
-                && non_empty(&wa.phone_number_id)
-                && non_empty(&wa.verify_token)
+            if wa.access_token.as_deref().is_some_and(non_empty)
+                && wa.phone_number_id.as_deref().is_some_and(non_empty)
+                && wa.verify_token.as_deref().is_some_and(non_empty)
             {
                 check_result(
                     "channels.whatsapp.core",
@@ -1835,6 +1835,7 @@ mod tests {
             allowed_users: vec!["*".to_string()],
             stream_mode: crate::config::StreamMode::default(),
             draft_update_interval_ms: 1000,
+            interrupt_on_new_message: false,
             mention_only: false,
         });
 

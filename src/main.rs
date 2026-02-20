@@ -41,6 +41,14 @@ use serde::{Deserialize, Serialize};
 use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
+    let t: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if !(0.0..=2.0).contains(&t) {
+        return Err("temperature must be between 0.0 and 2.0".to_string());
+    }
+    Ok(t)
+}
+
 mod agent;
 mod approval;
 mod auth;
@@ -62,6 +70,7 @@ mod identity;
 mod integrations;
 mod memory;
 mod migration;
+mod multimodal;
 mod observability;
 mod onboard;
 mod peripherals;
@@ -137,6 +146,17 @@ enum Commands {
     },
 
     /// Start the AI agent loop
+    #[command(long_about = "\
+Start the AI agent loop.
+
+Launches an interactive chat session with the configured AI provider. \
+Use --message for single-shot queries without entering interactive mode.
+
+Examples:
+    redclaw agent                              # interactive session
+    redclaw agent -m \"Summarize today's logs\"  # single message
+    redclaw agent -p anthropic --model claude-sonnet-4-20250514
+    redclaw agent --peripheral nucleo-f401re:/dev/ttyACM0")]
     Agent {
         /// Single message mode (don't enter interactive mode)
         #[arg(short, long)]
@@ -151,7 +171,7 @@ enum Commands {
         model: Option<String>,
 
         /// Temperature (0.0 - 2.0); defaults to config default_temperature
-        #[arg(short, long)]
+        #[arg(short, long, value_parser = parse_temperature)]
         temperature: Option<f64>,
 
         /// Attach a peripheral (board:path, e.g. nucleo-f401re:/dev/ttyACM0)
@@ -160,6 +180,18 @@ enum Commands {
     },
 
     /// Start the gateway server (webhooks, websockets)
+    #[command(long_about = "\
+Start the gateway server (webhooks, websockets).
+
+Runs the HTTP/WebSocket gateway that accepts incoming webhook events \
+and WebSocket connections. Bind address defaults to the values in \
+your config file (gateway.host / gateway.port).
+
+Examples:
+    redclaw gateway                  # use config defaults
+    redclaw gateway -p 8080          # listen on port 8080
+    redclaw gateway --host 0.0.0.0   # bind to all interfaces
+    redclaw gateway -p 0             # random available port")]
     Gateway {
         /// Port to listen on (use 0 for random available port)
         #[arg(short, long, default_value = "8080")]
@@ -171,6 +203,21 @@ enum Commands {
     },
 
     /// Start long-running autonomous runtime (gateway + channels + heartbeat + scheduler)
+    #[command(long_about = "\
+Start the long-running autonomous daemon.
+
+Launches the full RedClaw runtime: gateway server, all configured \
+channels (Telegram, Discord, Slack, etc.), heartbeat monitor, and \
+the cron scheduler. This is the recommended way to run RedClaw in \
+production or as an always-on assistant.
+
+Use 'redclaw service install' to register the daemon as an OS \
+service (systemd/launchd) for auto-start on boot.
+
+Examples:
+    redclaw daemon                   # use config defaults
+    redclaw daemon -p 9090           # gateway on port 9090
+    redclaw daemon --host 127.0.0.1  # localhost only")]
     Daemon {
         /// Port to listen on (use 0 for random available port)
         #[arg(short, long, default_value = "8080")]
@@ -197,6 +244,25 @@ enum Commands {
     Status,
 
     /// Configure and manage scheduled tasks
+    #[command(long_about = "\
+Configure and manage scheduled tasks.
+
+Schedule recurring, one-shot, or interval-based tasks using cron \
+expressions, RFC 3339 timestamps, durations, or fixed intervals.
+
+Cron expressions use the standard 5-field format: \
+'min hour day month weekday'. Timezones default to UTC; \
+override with --tz and an IANA timezone name.
+
+Examples:
+    redclaw cron list
+    redclaw cron add '0 9 * * 1-5' 'Good morning' --tz America/New_York
+    redclaw cron add '*/30 * * * *' 'Check system health'
+    redclaw cron add-at 2025-01-15T14:00:00Z 'Send reminder'
+    redclaw cron add-every 60000 'Ping heartbeat'
+    redclaw cron once 30m 'Run backup in 30 minutes'
+    redclaw cron pause <task-id>
+    redclaw cron update <task-id> --expression '0 8 * * *' --tz Europe/London")]
     Cron {
         #[command(subcommand)]
         cron_command: CronCommands,
@@ -212,6 +278,19 @@ enum Commands {
     Providers,
 
     /// Manage channels (telegram, discord, slack)
+    #[command(long_about = "\
+Manage communication channels.
+
+Add, remove, list, and health-check channels that connect RedClaw \
+to messaging platforms. Supported channel types: telegram, discord, \
+slack, whatsapp, matrix, imessage, email.
+
+Examples:
+    redclaw channel list
+    redclaw channel doctor
+    redclaw channel add telegram '{\"bot_token\":\"...\",\"name\":\"my-bot\"}'
+    redclaw channel remove my-bot
+    redclaw channel bind-telegram redclaw_user")]
     Channel {
         #[command(subcommand)]
         channel_command: ChannelCommands,
@@ -242,18 +321,52 @@ enum Commands {
     },
 
     /// Discover and introspect USB hardware
+    #[command(long_about = "\
+Discover and introspect USB hardware.
+
+Enumerate connected USB devices, identify known development boards \
+(STM32 Nucleo, Arduino, ESP32), and retrieve chip information via \
+probe-rs / ST-Link.
+
+Examples:
+    redclaw hardware discover
+    redclaw hardware introspect /dev/ttyACM0
+    redclaw hardware info --chip STM32F401RETx")]
     Hardware {
         #[command(subcommand)]
         hardware_command: redclaw::HardwareCommands,
     },
 
     /// Manage hardware peripherals (STM32, RPi GPIO, etc.)
+    #[command(long_about = "\
+Manage hardware peripherals.
+
+Add, list, flash, and configure hardware boards that expose tools \
+to the agent (GPIO, sensors, actuators). Supported boards: \
+nucleo-f401re, rpi-gpio, esp32, arduino-uno.
+
+Examples:
+    redclaw peripheral list
+    redclaw peripheral add nucleo-f401re /dev/ttyACM0
+    redclaw peripheral add rpi-gpio native
+    redclaw peripheral flash --port /dev/cu.usbmodem12345
+    redclaw peripheral flash-nucleo")]
     Peripheral {
         #[command(subcommand)]
         peripheral_command: redclaw::PeripheralCommands,
     },
 
     /// Manage configuration
+    #[command(long_about = "\
+Manage RedClaw configuration.
+
+Inspect and export configuration settings. Use 'schema' to dump \
+the full JSON Schema for the config file, which documents every \
+available key, type, and default value.
+
+Examples:
+  redclaw config schema              # print JSON Schema to stdout
+  redclaw config schema > schema.json")]
     Config {
         #[command(subcommand)]
         config_command: ConfigCommands,
@@ -288,6 +401,20 @@ enum CronCommands {
     Add {
         /// Cron expression
         expression: String,
+        /// Command to run
+        command: String,
+    },
+    /// Add a one-shot scheduled task at an RFC3339 timestamp
+    AddAt {
+        /// One-shot timestamp in RFC3339 format
+        at: String,
+        /// Command to run
+        command: String,
+    },
+    /// Add a fixed-interval scheduled task
+    AddEvery {
+        /// Interval in milliseconds
+        every_ms: u64,
         /// Command to run
         command: String,
     },
@@ -542,16 +669,17 @@ async fn main() -> Result<()> {
         }
 
         let config = if *channels_only {
-            onboard::run_channels_repair_wizard()?
+            onboard::run_channels_repair_wizard().await?
         } else if *interactive {
-            onboard::run_wizard()?
+            onboard::run_wizard().await?
         } else {
             onboard::run_quick_setup(
                 api_key.as_deref(),
                 provider.as_deref(),
                 model.as_deref(),
                 memory.as_deref(),
-            )?
+            )
+            .await?
         };
         // Auto-start channels if user said yes during wizard
         if std::env::var("REDCLAW_AUTOSTART_CHANNELS").as_deref() == Ok("1") {
@@ -561,7 +689,7 @@ async fn main() -> Result<()> {
     }
 
     // All other commands need config loaded first
-    let mut config = Config::load_or_init()?;
+    let mut config = Config::load_or_init().await?;
     config.apply_env_overrides();
 
     match cli.command {
@@ -771,7 +899,7 @@ async fn main() -> Result<()> {
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => channels::start_channels(config).await,
             ChannelCommands::Doctor => channels::doctor_channels(config).await,
-            other => channels::handle_command(other, &config),
+            other => channels::handle_command(other, &config).await,
         },
 
         Commands::Integrations {
@@ -793,7 +921,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Peripheral { peripheral_command } => {
-            peripherals::handle_command(peripheral_command.clone(), &config)
+            peripherals::handle_command(peripheral_command.clone(), &config).await
         }
 
         Commands::Config { config_command } => match config_command {

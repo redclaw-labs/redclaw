@@ -70,6 +70,24 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             println!("  Cmd : {}", job.command);
             Ok(())
         }
+        crate::CronCommands::AddAt { at, command } => {
+            let parsed: DateTime<Utc> = DateTime::parse_from_rfc3339(&at)
+                .with_context(|| format!("Invalid RFC3339 timestamp for add-at: {at}"))?
+                .with_timezone(&Utc);
+            let job = add_once_at(config, parsed, &command)?;
+            println!("✅ Added one-shot task {}", job.id);
+            println!("  Runs at: {}", job.next_run.to_rfc3339());
+            println!("  Cmd    : {}", job.command);
+            Ok(())
+        }
+        crate::CronCommands::AddEvery { every_ms, command } => {
+            let job = add_every_ms(config, every_ms, &command)?;
+            println!("✅ Added interval task {}", job.id);
+            println!("  Every: {}ms", every_ms);
+            println!("  Next : {}", job.next_run.to_rfc3339());
+            println!("  Cmd  : {}", job.command);
+            Ok(())
+        }
         crate::CronCommands::Once { delay, command } => {
             let job = add_once(config, &delay, &command)?;
             println!("✅ Added one-shot task {}", job.id);
@@ -127,6 +145,41 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             Ok(())
         }
     }
+}
+
+pub fn add_every_ms(config: &Config, every_ms: u64, command: &str) -> Result<CronJob> {
+    check_max_tasks(config)?;
+    let now = Utc::now();
+    let every_ms_i64 =
+        i64::try_from(every_ms).with_context(|| format!("every_ms too large: {every_ms}"))?;
+    if every_ms_i64 <= 0 {
+        anyhow::bail!("every_ms must be > 0");
+    }
+
+    let next_run = now + chrono::Duration::milliseconds(every_ms_i64);
+    let id = Uuid::new_v4().to_string();
+    let expression = format!("@every_ms:{every_ms}");
+
+    with_connection(config, |conn| {
+        conn.execute(
+            "INSERT INTO cron_jobs (id, expression, command, created_at, next_run, paused, one_shot)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+            params![id, expression, command, now.to_rfc3339(), next_run.to_rfc3339()],
+        )
+        .context("Failed to insert interval cron job")?;
+        Ok(())
+    })?;
+
+    Ok(CronJob {
+        id,
+        expression,
+        command: command.to_string(),
+        next_run,
+        last_run: None,
+        last_status: None,
+        paused: false,
+        one_shot: false,
+    })
 }
 
 pub fn add_job(config: &Config, expression: &str, command: &str) -> Result<CronJob> {
@@ -436,6 +489,16 @@ pub fn reschedule_after_run(
 }
 
 fn next_run_for(expression: &str, from: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    if let Some(every_ms) = expression.trim().strip_prefix("@every_ms:") {
+        let every_ms = every_ms.trim().parse::<i64>().with_context(|| {
+            format!("Invalid @every_ms expression (expected integer ms): {expression}")
+        })?;
+        if every_ms <= 0 {
+            anyhow::bail!("Invalid @every_ms expression (must be > 0): {expression}");
+        }
+        return Ok(from + chrono::Duration::milliseconds(every_ms));
+    }
+
     let normalized = normalize_expression(expression)?;
     let schedule = Schedule::from_str(&normalized)
         .with_context(|| format!("Invalid cron expression: {expression}"))?;
