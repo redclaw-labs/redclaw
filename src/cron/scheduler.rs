@@ -11,6 +11,7 @@ use tokio::time::{self, Duration};
 
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
+const SCHEDULER_COMPONENT: &str = "scheduler";
 
 pub async fn run(config: Config) -> Result<()> {
     if !config.scheduler.enabled {
@@ -23,27 +24,38 @@ pub async fn run(config: Config) -> Result<()> {
 
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
     let mut interval = time::interval(Duration::from_secs(poll_secs));
+    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let max_concurrent = config.scheduler.max_concurrent.max(1);
     let security = Arc::new(SecurityPolicy::from_config(
         &config.autonomy,
         &config.workspace_dir,
     ));
 
-    crate::health::mark_component_ok("scheduler");
+    crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
     loop {
         interval.tick().await;
 
+        // Keep scheduler liveness fresh even when there are no due jobs.
+        crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+
         let jobs = match due_jobs(&config, Utc::now()) {
             Ok(jobs) => jobs,
             Err(e) => {
-                crate::health::mark_component_error("scheduler", e.to_string());
+                crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string());
                 tracing::warn!("Scheduler query failed: {e}");
                 continue;
             }
         };
 
-        process_due_jobs(&config, &security, jobs, max_concurrent).await;
+        process_due_jobs(
+            &config,
+            &security,
+            jobs,
+            max_concurrent,
+            SCHEDULER_COMPONENT,
+        )
+        .await;
     }
 }
 
@@ -52,17 +64,27 @@ async fn process_due_jobs(
     security: &Arc<SecurityPolicy>,
     jobs: Vec<CronJob>,
     max_concurrent: usize,
+    component: &str,
 ) {
-    let mut in_flight = stream::iter(jobs.into_iter().map(|job| {
-        let config = config.clone();
-        let security = Arc::clone(security);
-        async move { execute_and_reschedule_job(&config, security.as_ref(), &job).await }
-    }))
-    .buffer_unordered(max_concurrent);
+    // Refresh scheduler health on every successful poll cycle, including idle cycles.
+    crate::health::mark_component_ok(component);
+
+    let mut in_flight =
+        stream::iter(
+            jobs.into_iter().map(|job| {
+                let config = config.clone();
+                let security = Arc::clone(security);
+                let component = component.to_owned();
+                async move {
+                    execute_and_reschedule_job(&config, security.as_ref(), &job, &component).await
+                }
+            }),
+        )
+        .buffer_unordered(max_concurrent);
 
     while let Some((job_id, success)) = in_flight.next().await {
         if !success {
-            crate::health::mark_component_error("scheduler", format!("job {job_id} failed"));
+            tracing::warn!("Scheduler job '{job_id}' failed");
         }
     }
 }
@@ -71,12 +93,13 @@ async fn execute_and_reschedule_job(
     config: &Config,
     security: &SecurityPolicy,
     job: &CronJob,
+    component: &str,
 ) -> (String, bool) {
-    crate::health::mark_component_ok("scheduler");
+    crate::health::mark_component_ok(component);
     let (success, output) = execute_job_with_retry(config, security, job).await;
 
     if let Err(e) = reschedule_after_run(config, job, success, &output) {
-        crate::health::mark_component_error("scheduler", e.to_string());
+        crate::health::mark_component_error(component, e.to_string());
         tracing::warn!("Failed to persist scheduler run result: {e}");
         return (job.id.clone(), false);
     }
@@ -296,6 +319,49 @@ mod tests {
             paused: false,
             one_shot: false,
         }
+    }
+
+    fn unique_component(prefix: &str) -> String {
+        format!("{prefix}-{}", uuid::Uuid::new_v4())
+    }
+
+    #[tokio::test]
+    async fn process_due_jobs_marks_component_ok_even_when_idle() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let security = Arc::new(SecurityPolicy::from_config(
+            &config.autonomy,
+            &config.workspace_dir,
+        ));
+        let component = unique_component("scheduler-idle");
+
+        crate::health::mark_component_error(&component, "pre-existing error");
+        process_due_jobs(&config, &security, Vec::new(), 1, &component).await;
+
+        let snapshot = crate::health::snapshot_json();
+        let entry = &snapshot["components"][component.as_str()];
+        assert_eq!(entry["status"], "ok");
+        assert!(entry["last_ok"].as_str().is_some());
+        assert!(entry["last_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn process_due_jobs_failure_does_not_mark_component_unhealthy() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = test_job("ls definitely_missing_file_for_scheduler_component_health_test");
+        let security = Arc::new(SecurityPolicy::from_config(
+            &config.autonomy,
+            &config.workspace_dir,
+        ));
+        let component = unique_component("scheduler-fail");
+
+        crate::health::mark_component_ok(&component);
+        process_due_jobs(&config, &security, vec![job], 1, &component).await;
+
+        let snapshot = crate::health::snapshot_json();
+        let entry = &snapshot["components"][component.as_str()];
+        assert_eq!(entry["status"], "ok");
     }
 
     #[tokio::test]
