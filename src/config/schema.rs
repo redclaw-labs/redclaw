@@ -29,6 +29,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "channel.lark",
     "channel.matrix",
     "channel.mattermost",
+    "channel.nextcloud_talk",
     "channel.qq",
     "channel.signal",
     "channel.slack",
@@ -87,6 +88,10 @@ pub struct Config {
 
     #[serde(default)]
     pub agent: AgentConfig,
+
+    /// Skills loading and community repository behavior (`[skills]`).
+    #[serde(default)]
+    pub skills: SkillsConfig,
 
     /// Model routing rules — route `hint:<name>` to specific provider+model combos.
     #[serde(default)]
@@ -183,10 +188,26 @@ pub struct DelegateAgentConfig {
     /// Max recursion depth for nested delegation
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
+
+    /// Enable agentic sub-agent mode (multi-turn tool-call loop).
+    #[serde(default)]
+    pub agentic: bool,
+
+    /// Allowlist of tool names available to the sub-agent in agentic mode.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    /// Maximum tool-call iterations in agentic mode.
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_iterations: usize,
 }
 
 fn default_max_depth() -> u32 {
     3
+}
+
+fn default_max_tool_iterations() -> usize {
+    10
 }
 
 // ── Hardware Config (wizard-driven) ─────────────────────────────
@@ -296,6 +317,44 @@ impl Default for AgentConfig {
             tool_dispatcher: default_agent_tool_dispatcher(),
         }
     }
+}
+
+/// Skills loading configuration (`[skills]` section).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillsPromptInjectionMode {
+    /// Inline full skill instructions and tool metadata into the system prompt.
+    #[default]
+    Full,
+    /// Inline only compact skill metadata (name/description/location) and load details on demand.
+    Compact,
+}
+
+fn parse_skills_prompt_injection_mode(raw: &str) -> Option<SkillsPromptInjectionMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "full" => Some(SkillsPromptInjectionMode::Full),
+        "compact" => Some(SkillsPromptInjectionMode::Compact),
+        _ => None,
+    }
+}
+
+/// Skills loading configuration (`[skills]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SkillsConfig {
+    /// Enable loading and syncing the community open-skills repository.
+    /// Default: `false` (opt-in).
+    #[serde(default)]
+    pub open_skills_enabled: bool,
+
+    /// Optional path to a local open-skills repository.
+    /// If unset, defaults to `$HOME/open-skills` when enabled.
+    #[serde(default)]
+    pub open_skills_dir: Option<String>,
+
+    /// Controls how skills are injected into the system prompt.
+    /// `full` preserves legacy behavior. `compact` keeps context small and loads skills on demand.
+    #[serde(default)]
+    pub prompt_injection_mode: SkillsPromptInjectionMode,
 }
 
 // ── Identity (AIEOS / OpenClaw format) ──────────────────────────
@@ -828,7 +887,7 @@ fn default_http_timeout_secs() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WebSearchConfig {
     /// Enable `web_search_tool` for web searches
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     /// Search provider: "duckduckgo" (free, no API key) or "brave" (requires API key)
     #[serde(default = "default_web_search_provider")]
@@ -859,7 +918,7 @@ fn default_web_search_timeout_secs() -> u64 {
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             provider: default_web_search_provider(),
             brave_api_key: None,
             max_results: default_web_search_max_results(),
@@ -2060,12 +2119,17 @@ pub struct ChannelsConfig {
     pub signal: Option<SignalConfig>,
     pub whatsapp: Option<WhatsAppConfig>,
     pub linq: Option<LinqConfig>,
+    /// Nextcloud Talk bot channel configuration.
+    pub nextcloud_talk: Option<NextcloudTalkConfig>,
     pub email: Option<crate::channels::email_channel::EmailConfig>,
     pub irc: Option<IrcConfig>,
     pub lark: Option<LarkConfig>,
     pub dingtalk: Option<DingTalkConfig>,
     pub qq: Option<QqConfig>,
-    /// Timeout in seconds for processing a single channel message (LLM + tools).
+    /// Base timeout in seconds for processing a single channel message (LLM + tools).
+    /// Runtime uses this as a per-turn budget that scales with tool-loop depth
+    /// (up to 4x, capped) so one slow/retried model call does not consume the
+    /// entire conversation budget.
     /// Default: 300s for on-device LLMs (Ollama) which are slower than cloud APIs.
     #[serde(default = "default_channel_message_timeout_secs")]
     pub message_timeout_secs: u64,
@@ -2089,6 +2153,7 @@ impl Default for ChannelsConfig {
             signal: None,
             whatsapp: None,
             linq: None,
+            nextcloud_talk: None,
             email: None,
             irc: None,
             lark: None,
@@ -2270,6 +2335,23 @@ pub struct LinqConfig {
     pub allowed_senders: Vec<String>,
 }
 
+/// Nextcloud Talk bot configuration (webhook receive + OCS send API).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NextcloudTalkConfig {
+    /// Nextcloud base URL (e.g. "https://cloud.example.com").
+    pub base_url: String,
+    /// Bot app token used for OCS API bearer auth.
+    pub app_token: String,
+    /// Shared secret for webhook signature verification.
+    ///
+    /// Can also be set via `REDCLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET`.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    /// Allowed Nextcloud actor IDs (`[]` = deny all, `"*"` = allow all).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+}
+
 impl WhatsAppConfig {
     /// Detect which backend to use based on config fields.
     /// Returns "cloud" if phone_number_id is set, "web" if session_path is set.
@@ -2290,6 +2372,13 @@ impl WhatsAppConfig {
 
     pub fn is_web_config(&self) -> bool {
         self.session_path.is_some()
+    }
+
+    /// Returns true when both Cloud and Web selectors are present.
+    ///
+    /// Runtime currently prefers Cloud mode in this case for backward compatibility.
+    pub fn is_ambiguous_config(&self) -> bool {
+        self.phone_number_id.is_some() && self.session_path.is_some()
     }
 }
 
@@ -2549,6 +2638,7 @@ impl Default for Config {
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             agent: AgentConfig::default(),
+            skills: SkillsConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
@@ -2706,6 +2796,7 @@ fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf, PathBuf) 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConfigResolutionSource {
+    EnvConfigDir,
     EnvWorkspace,
     ActiveWorkspaceMarker,
     DefaultConfigDir,
@@ -2714,6 +2805,7 @@ enum ConfigResolutionSource {
 impl ConfigResolutionSource {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::EnvConfigDir => "REDCLAW_CONFIG_DIR",
             Self::EnvWorkspace => "REDCLAW_WORKSPACE",
             Self::ActiveWorkspaceMarker => "active_workspace.toml",
             Self::DefaultConfigDir => "default",
@@ -2725,10 +2817,18 @@ async fn resolve_runtime_config_dirs(
     default_redclaw_dir: &Path,
     default_workspace_dir: &Path,
 ) -> Result<(PathBuf, PathBuf, ConfigResolutionSource)> {
-    // Resolution priority:
-    // 1. REDCLAW_WORKSPACE env override
-    // 2. Persisted active workspace marker from onboarding/custom profile
-    // 3. Default ~/.redclaw layout
+    if let Ok(custom_config_dir) = std::env::var("REDCLAW_CONFIG_DIR") {
+        let custom_config_dir = custom_config_dir.trim();
+        if !custom_config_dir.is_empty() {
+            let redclaw_dir = PathBuf::from(custom_config_dir);
+            return Ok((
+                redclaw_dir.clone(),
+                redclaw_dir.join("workspace"),
+                ConfigResolutionSource::EnvConfigDir,
+            ));
+        }
+    }
+
     if let Ok(custom_workspace) = std::env::var("REDCLAW_WORKSPACE") {
         if !custom_workspace.is_empty() {
             let (redclaw_dir, workspace_dir) =
@@ -2758,6 +2858,42 @@ async fn resolve_runtime_config_dirs(
     ))
 }
 
+fn config_dir_creation_error(path: &Path) -> String {
+    format!(
+        "Failed to create config directory: {}. If running as an OpenRC service, \
+         ensure this path is writable by user 'redclaw'.",
+        path.display()
+    )
+}
+
+fn is_local_ollama_endpoint(api_url: Option<&str>) -> bool {
+    let Some(raw) = api_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+
+    reqwest::Url::parse(raw)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0"))
+}
+
+fn has_ollama_cloud_credential(config_api_key: Option<&str>) -> bool {
+    let config_key_present = config_api_key
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if config_key_present {
+        return true;
+    }
+
+    ["OLLAMA_API_KEY", "REDCLAW_API_KEY", "API_KEY"]
+        .iter()
+        .any(|name| {
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
 impl Config {
     pub async fn load_or_init() -> Result<Self> {
         // Resolve workspace first so config loading can follow REDCLAW_WORKSPACE.
@@ -2770,7 +2906,7 @@ impl Config {
 
         fs::create_dir_all(&redclaw_dir)
             .await
-            .context("Failed to create config directory")?;
+            .with_context(|| config_dir_creation_error(&redclaw_dir))?;
         fs::create_dir_all(&workspace_dir)
             .await
             .context("Failed to create workspace directory")?;
@@ -2899,6 +3035,29 @@ impl Config {
             }
         }
 
+        // Ollama cloud-routing safety checks
+        if self
+            .default_provider
+            .as_deref()
+            .is_some_and(|provider| provider.trim().eq_ignore_ascii_case("ollama"))
+            && self
+                .default_model
+                .as_deref()
+                .is_some_and(|model| model.trim().ends_with(":cloud"))
+        {
+            if is_local_ollama_endpoint(self.api_url.as_deref()) {
+                anyhow::bail!(
+                    "default_model uses ':cloud' with provider 'ollama', but api_url is local or unset. Set api_url to a remote Ollama endpoint (for example https://ollama.com)."
+                );
+            }
+
+            if !has_ollama_cloud_credential(self.api_key.as_deref()) {
+                anyhow::bail!(
+                    "default_model uses ':cloud' with provider 'ollama', but no API key is configured. Set api_key or OLLAMA_API_KEY."
+                );
+            }
+        }
+
         self.proxy.validate()?;
         Ok(())
     }
@@ -2970,6 +3129,40 @@ impl Config {
                     resolve_config_dir_for_workspace(&workspace_root);
                 self.workspace_dir = workspace_dir;
                 self.config_path = redclaw_dir.join("config.toml");
+            }
+        }
+
+        // Open-skills opt-in flag: REDCLAW_OPEN_SKILLS_ENABLED
+        if let Ok(flag) = std::env::var("REDCLAW_OPEN_SKILLS_ENABLED") {
+            if !flag.trim().is_empty() {
+                match flag.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => self.skills.open_skills_enabled = true,
+                    "0" | "false" | "no" | "off" => self.skills.open_skills_enabled = false,
+                    _ => tracing::warn!(
+                        "Ignoring invalid REDCLAW_OPEN_SKILLS_ENABLED (valid: 1|0|true|false|yes|no|on|off)"
+                    ),
+                }
+            }
+        }
+
+        // Open-skills directory override: REDCLAW_OPEN_SKILLS_DIR
+        if let Ok(path) = std::env::var("REDCLAW_OPEN_SKILLS_DIR") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                self.skills.open_skills_dir = Some(trimmed.to_string());
+            }
+        }
+
+        // Skills prompt mode override: REDCLAW_SKILLS_PROMPT_MODE
+        if let Ok(mode) = std::env::var("REDCLAW_SKILLS_PROMPT_MODE") {
+            if !mode.trim().is_empty() {
+                if let Some(parsed) = parse_skills_prompt_injection_mode(&mode) {
+                    self.skills.prompt_injection_mode = parsed;
+                } else {
+                    tracing::warn!(
+                        "Ignoring invalid REDCLAW_SKILLS_PROMPT_MODE (valid: full|compact)"
+                    );
+                }
             }
         }
 
@@ -3112,19 +3305,22 @@ impl Config {
     }
 }
 
-#[cfg(unix)]
 async fn sync_directory(path: &Path) -> Result<()> {
-    let dir = File::open(path)
-        .await
-        .with_context(|| format!("Failed to open directory for fsync: {}", path.display()))?;
-    dir.sync_all()
-        .await
-        .with_context(|| format!("Failed to fsync directory metadata: {}", path.display()))?;
-    Ok(())
-}
+    #[cfg(unix)]
+    {
+        let dir = File::open(path)
+            .await
+            .with_context(|| format!("Failed to open directory for fsync: {}", path.display()))?;
+        dir.sync_all()
+            .await
+            .with_context(|| format!("Failed to fsync directory metadata: {}", path.display()))?;
+    }
 
-#[cfg(not(unix))]
-async fn sync_directory(_path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
     Ok(())
 }
 
@@ -3142,8 +3338,21 @@ mod tests {
         assert!(c.default_model.as_deref().unwrap().contains("claude"));
         assert!((c.default_temperature - 0.7).abs() < f64::EPSILON);
         assert!(c.api_key.is_none());
+        assert!(!c.skills.open_skills_enabled);
+        assert_eq!(
+            c.skills.prompt_injection_mode,
+            SkillsPromptInjectionMode::Full
+        );
         assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
         assert!(c.config_path.to_string_lossy().contains("config.toml"));
+    }
+
+    #[test]
+    fn config_dir_creation_error_mentions_openrc_and_path() {
+        let msg = config_dir_creation_error(Path::new("/etc/redclaw"));
+        assert!(msg.contains("/etc/redclaw"));
+        assert!(msg.contains("OpenRC"));
+        assert!(msg.contains("redclaw"));
     }
 
     #[test]
@@ -3164,6 +3373,7 @@ mod tests {
             .expect("schema should expose top-level properties");
 
         assert!(properties.contains_key("default_provider"));
+        assert!(properties.contains_key("skills"));
         assert!(properties.contains_key("gateway"));
         assert!(properties.contains_key("channels_config"));
         assert!(!properties.contains_key("workspace_dir"));
@@ -3236,6 +3446,7 @@ mod tests {
         assert!(c.cli);
         assert!(c.telegram.is_none());
         assert!(c.discord.is_none());
+        assert!(c.nextcloud_talk.is_none());
     }
 
     // ── Serde round-trip ─────────────────────────────────────
@@ -3300,6 +3511,7 @@ mod tests {
                 signal: None,
                 whatsapp: None,
                 linq: None,
+                nextcloud_talk: None,
                 email: None,
                 irc: None,
                 lark: None,
@@ -3319,6 +3531,7 @@ mod tests {
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
+            skills: SkillsConfig::default(),
             identity: IdentityConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
@@ -3435,6 +3648,7 @@ tool_dispatcher = "xml"
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             agent: AgentConfig::default(),
+            skills: SkillsConfig::default(),
             identity: IdentityConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
@@ -3668,6 +3882,7 @@ tool_dispatcher = "xml"
             signal: None,
             whatsapp: None,
             linq: None,
+            nextcloud_talk: None,
             email: None,
             irc: None,
             lark: None,
@@ -3845,6 +4060,7 @@ channel_id = "C123"
                 allowed_numbers: vec!["+1".into()],
             }),
             linq: None,
+            nextcloud_talk: None,
             email: None,
             irc: None,
             lark: None,
