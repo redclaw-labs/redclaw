@@ -141,3 +141,64 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Deploy RedClaw binary + config to Arduino Uno Q via SSH/SCP.
+///
+/// Expects a cross-compiled binary at `target/aarch64-unknown-linux-gnu/release/redclaw`.
+pub fn deploy_uno_q(host: &str) -> Result<()> {
+    let ssh_target = if host.contains('@') {
+        host.to_string()
+    } else {
+        format!("arduino@{}", host)
+    };
+
+    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("aarch64-unknown-linux-gnu")
+        .join("release")
+        .join("redclaw");
+
+    if !binary.exists() {
+        anyhow::bail!(
+            "Cross-compiled binary not found at {}.\nBuild with: ./dev/cross-uno-q.sh",
+            binary.display()
+        );
+    }
+
+    println!("Creating remote directory on {}...", host);
+    let status = Command::new("ssh")
+        .args([&ssh_target, "mkdir", "-p", "~/redclaw"])
+        .status()
+        .context("ssh mkdir failed")?;
+    if !status.success() {
+        anyhow::bail!("Failed to create ~/redclaw on Uno Q");
+    }
+
+    println!("Copying redclaw binary...");
+    let status = Command::new("scp")
+        .args([
+            binary.to_str().unwrap(),
+            &format!("{}:~/redclaw/redclaw", ssh_target),
+        ])
+        .status()
+        .context("scp binary failed")?;
+    if !status.success() {
+        anyhow::bail!("Failed to copy binary");
+    }
+
+    let status = Command::new("ssh")
+        .args([&ssh_target, "chmod", "+x", "~/redclaw/redclaw"])
+        .status()
+        .context("ssh chmod failed")?;
+    if !status.success() {
+        anyhow::bail!("Failed to set executable bit");
+    }
+
+    println!();
+    println!("RedClaw deployed to Uno Q!");
+    println!("  Binary: ~/redclaw/redclaw");
+    println!();
+    println!("Start with: ssh {} '~/redclaw/redclaw agent'", ssh_target);
+
+    Ok(())
+}
