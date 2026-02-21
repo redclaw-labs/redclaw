@@ -101,12 +101,31 @@ impl OllamaProvider {
         });
 
         Self {
-            base_url: base_url
-                .unwrap_or("http://localhost:11434")
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: Self::normalize_base_url(base_url.unwrap_or("http://localhost:11434")),
             api_key,
             reasoning_enabled,
+        }
+    }
+
+    fn normalize_base_url(base_url: &str) -> String {
+        let trimmed = base_url.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        let mut normalized = trimmed.trim_end_matches('/');
+
+        // The provider always appends `/api/chat` when sending requests.
+        // If the configured URL already ends with `/api`, strip it to avoid
+        // accidentally generating `/api/api/chat`.
+        if let Some(stripped) = normalized.strip_suffix("/api") {
+            normalized = stripped.trim_end_matches('/');
+        }
+
+        if normalized.starts_with("http://") || normalized.starts_with("https://") {
+            normalized.to_string()
+        } else {
+            format!("http://{normalized}")
         }
     }
 
@@ -581,6 +600,12 @@ mod tests {
     }
 
     #[test]
+    fn custom_url_strips_api_suffix() {
+        let p = OllamaProvider::new(Some("https://ollama.com/api/"), None);
+        assert_eq!(p.base_url, "https://ollama.com");
+    }
+
+    #[test]
     fn empty_url_uses_empty() {
         let p = OllamaProvider::new(Some(""), None);
         assert_eq!(p.base_url, "");
@@ -620,6 +645,14 @@ mod tests {
     fn remote_endpoint_auth_enabled_when_key_present() {
         let p = OllamaProvider::new(Some("https://ollama.com"), Some("ollama-key"));
         let (_model, should_auth) = p.resolve_request_details("qwen3").unwrap();
+        assert!(should_auth);
+    }
+
+    #[test]
+    fn remote_endpoint_with_api_suffix_still_allows_cloud_models() {
+        let p = OllamaProvider::new(Some("https://ollama.com/api"), Some("ollama-key"));
+        let (model, should_auth) = p.resolve_request_details("qwen3:cloud").unwrap();
+        assert_eq!(model, "qwen3");
         assert!(should_auth);
     }
 

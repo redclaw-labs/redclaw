@@ -1047,4 +1047,166 @@ mod tests {
         let result = provider.warmup().await;
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn convert_messages_preserves_multi_turn_history() {
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are helpful.".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "gen a 2 sum in golang".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "```go\nfunc twoSum(nums []int) {}\n```".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "what's meaning of make here?".to_string(),
+            },
+        ];
+
+        let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
+
+        // System prompt extracted
+        assert!(system.is_some());
+        // All 3 non-system messages preserved in order
+        assert_eq!(native_msgs.len(), 3);
+        assert_eq!(native_msgs[0].role, "user");
+        assert_eq!(native_msgs[1].role, "assistant");
+        assert_eq!(native_msgs[2].role, "user");
+    }
+
+    /// Integration test: spin up a mock Anthropic API server, call chat()
+    /// with a multi-turn conversation + tools, and verify the request body contains
+    /// ALL conversation turns and native tool definitions.
+    #[tokio::test]
+    async fn chat_sends_full_history_and_native_tools() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+        use tokio::net::TcpListener;
+
+        // Captured request body for assertion
+        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let cap = captured_clone.clone();
+                async move {
+                    *cap.lock().unwrap() = Some(body);
+                    // Return a minimal valid Anthropic response
+                    Json(serde_json::json!({
+                        "id": "msg_test",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "The make function creates a map."}],
+                        "model": "claude-opus-4-6",
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 100, "output_tokens": 20}
+                    }))
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Create provider pointing at mock server
+        let provider = AnthropicProvider {
+            credential: Some("test-key".to_string()),
+            base_url: format!("http://{addr}"),
+        };
+
+        // Multi-turn conversation: system → user (Go code) → assistant (code response) → user (follow-up)
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("gen a 2 sum in golang"),
+            ChatMessage::assistant("```go\nfunc twoSum(nums []int, target int) []int {\n    m := make(map[int]int)\n    for i, n := range nums {\n        if j, ok := m[target-n]; ok {\n            return []int{j, i}\n        }\n        m[n] = i\n    }\n    return nil\n}\n```"),
+            ChatMessage::user("what's meaning of make here?"),
+        ];
+
+        let tools = vec![ToolSpec {
+            name: "shell".to_string(),
+            description: "Run a shell command".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"}
+                },
+                "required": ["command"]
+            }),
+        }];
+
+        let request = ProviderChatRequest {
+            messages: &messages,
+            tools: Some(&tools),
+        };
+        let result = provider.chat(request, "claude-opus-4-6", 0.7).await;
+        assert!(result.is_ok(), "chat() failed: {:?}", result.err());
+
+        let body = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("No request captured");
+
+        // Verify system prompt extracted to top-level field
+        let system = &body["system"];
+        assert!(
+            system.to_string().contains("helpful assistant"),
+            "System prompt missing: {system}"
+        );
+
+        // Verify ALL conversation turns present in messages array
+        let msgs = body["messages"].as_array().expect("messages not an array");
+        assert_eq!(
+            msgs.len(),
+            3,
+            "Expected 3 messages (2 user + 1 assistant), got {}",
+            msgs.len()
+        );
+
+        // Turn 1: user with Go request
+        assert_eq!(msgs[0]["role"], "user");
+        let turn1_text = msgs[0]["content"].to_string();
+        assert!(
+            turn1_text.contains("2 sum"),
+            "Turn 1 missing Go request: {turn1_text}"
+        );
+
+        // Turn 2: assistant with Go code
+        assert_eq!(msgs[1]["role"], "assistant");
+        let turn2_text = msgs[1]["content"].to_string();
+        assert!(
+            turn2_text.contains("make(map[int]int)"),
+            "Turn 2 missing Go code: {turn2_text}"
+        );
+
+        // Turn 3: user follow-up
+        assert_eq!(msgs[2]["role"], "user");
+        let turn3_text = msgs[2]["content"].to_string();
+        assert!(
+            turn3_text.contains("meaning of make"),
+            "Turn 3 missing follow-up: {turn3_text}"
+        );
+
+        // Verify native tools are present
+        let api_tools = body["tools"].as_array().expect("tools not an array");
+        assert_eq!(api_tools.len(), 1);
+        assert_eq!(api_tools[0]["name"], "shell");
+        assert!(
+            api_tools[0]["input_schema"].is_object(),
+            "Missing input_schema"
+        );
+
+        server_handle.abort();
+    }
 }
