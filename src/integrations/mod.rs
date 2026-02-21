@@ -107,7 +107,7 @@ fn show_integration_info(config: &Config, name: &str) -> Result<()> {
             println!("  Setup:");
             println!("    1. Message @BotFather on Telegram");
             println!("    2. Create a bot and copy the token");
-            println!("    3. Run: redclaw onboard");
+            println!("    3. Run: redclaw onboard --channels-only");
             println!("    4. Start: redclaw channel start");
         }
         "Discord" => {
@@ -115,13 +115,13 @@ fn show_integration_info(config: &Config, name: &str) -> Result<()> {
             println!("    1. Go to https://discord.com/developers/applications");
             println!("    2. Create app → Bot → Copy token");
             println!("    3. Enable MESSAGE CONTENT intent");
-            println!("    4. Run: redclaw onboard");
+            println!("    4. Run: redclaw onboard --channels-only");
         }
         "Slack" => {
             println!("  Setup:");
             println!("    1. Go to https://api.slack.com/apps");
             println!("    2. Create app → Bot Token Scopes → Install");
-            println!("    3. Run: redclaw onboard");
+            println!("    3. Run: redclaw onboard --channels-only");
         }
         "OpenRouter" => {
             println!("  Setup:");

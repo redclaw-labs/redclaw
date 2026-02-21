@@ -25,7 +25,7 @@ cargo clippy --all-targets -- -D clippy::correctness
 # Optional strict lint audit (recommended periodically)
 cargo clippy --all-targets -- -D warnings
 
-# Release build (~3.4MB)
+# Release build
 cargo build --release
 ```
 
