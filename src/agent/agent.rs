@@ -34,6 +34,7 @@ pub struct Agent {
     cost_tracker: Option<Arc<CostTracker>>,
     identity_config: crate::config::IdentityConfig,
     skills: Vec<crate::skills::Skill>,
+    skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
     auto_save: bool,
     history: Vec<ConversationMessage>,
     classification_config: crate::config::QueryClassificationConfig,
@@ -56,6 +57,7 @@ pub struct AgentBuilder {
     cost_tracker: Option<Arc<CostTracker>>,
     identity_config: Option<crate::config::IdentityConfig>,
     skills: Option<Vec<crate::skills::Skill>>,
+    skills_prompt_mode: Option<crate::config::SkillsPromptInjectionMode>,
     auto_save: Option<bool>,
     classification_config: Option<crate::config::QueryClassificationConfig>,
     available_hints: Option<Vec<String>>,
@@ -79,6 +81,7 @@ impl AgentBuilder {
             cost_tracker: None,
             identity_config: None,
             skills: None,
+            skills_prompt_mode: None,
             auto_save: None,
             classification_config: None,
             available_hints: None,
@@ -156,6 +159,14 @@ impl AgentBuilder {
         self
     }
 
+    pub fn skills_prompt_mode(
+        mut self,
+        skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
+    ) -> Self {
+        self.skills_prompt_mode = Some(skills_prompt_mode);
+        self
+    }
+
     pub fn auto_save(mut self, auto_save: bool) -> Self {
         self.auto_save = Some(auto_save);
         self
@@ -217,6 +228,7 @@ impl AgentBuilder {
             cost_tracker: self.cost_tracker,
             identity_config: self.identity_config.unwrap_or_default(),
             skills: self.skills.unwrap_or_default(),
+            skills_prompt_mode: self.skills_prompt_mode.unwrap_or_default(),
             auto_save: self.auto_save.unwrap_or(false),
             history: Vec::new(),
             classification_config: self.classification_config.unwrap_or_default(),
@@ -359,7 +371,11 @@ impl Agent {
             .classification_config(config.query_classification.clone())
             .available_hints(available_hints)
             .identity_config(config.identity.clone())
-            .skills(crate::skills::load_skills(&config.workspace_dir))
+            .skills(crate::skills::load_skills_with_config(
+                &config.workspace_dir,
+                config,
+            ))
+            .skills_prompt_mode(config.skills.prompt_injection_mode)
             .auto_save(config.memory.auto_save)
             .policy_engine(policy_engine)
             .build()
@@ -409,6 +425,7 @@ impl Agent {
             model_name: &self.model_name,
             tools: &self.tools,
             skills: &self.skills,
+            skills_prompt_mode: self.skills_prompt_mode,
             identity_config: Some(&self.identity_config),
             dispatcher_instructions: &instructions,
         };
@@ -539,11 +556,11 @@ impl Agent {
             return results;
         }
 
-        let mut results = Vec::with_capacity(calls.len());
-        for call in calls {
-            results.push(self.execute_tool_call(call).await);
-        }
-        results
+        let futs: Vec<_> = calls
+            .iter()
+            .map(|call| self.execute_tool_call(call))
+            .collect();
+        futures_util::future::join_all(futs).await
     }
 
     pub async fn turn(&mut self, user_message: &str) -> Result<String> {

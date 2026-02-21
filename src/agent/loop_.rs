@@ -29,6 +29,10 @@ const STREAM_CHUNK_MIN_CHARS: usize = 80;
 /// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 
+/// Minimum user-message length (in chars) for auto-save to memory.
+/// Matches the channel-side constant in `channels/mod.rs`.
+const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
+
 static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:\"([^\"]{8,})\"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#,
@@ -374,7 +378,11 @@ fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
             .trim()
             .to_string();
         if !name.is_empty() {
-            let arguments = parse_arguments_value(function.get("arguments"));
+            let arguments = parse_arguments_value(
+                function
+                    .get("arguments")
+                    .or_else(|| function.get("parameters")),
+            );
             return Some(ParsedToolCall { name, arguments });
         }
     }
@@ -390,7 +398,8 @@ fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
         return None;
     }
 
-    let arguments = parse_arguments_value(value.get("arguments"));
+    let arguments =
+        parse_arguments_value(value.get("arguments").or_else(|| value.get("parameters")));
     Some(ParsedToolCall { name, arguments })
 }
 
@@ -423,6 +432,147 @@ fn parse_tool_calls_from_json_value(value: &serde_json::Value) -> Vec<ParsedTool
     }
 
     calls
+}
+
+fn is_xml_meta_tag(tag: &str) -> bool {
+    let normalized = tag.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "tool_call"
+            | "toolcall"
+            | "tool-call"
+            | "invoke"
+            | "thinking"
+            | "thought"
+            | "analysis"
+            | "reasoning"
+            | "reflection"
+    )
+}
+
+fn is_valid_xml_tag_name(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn extract_xml_tag_pairs(input: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut cursor = 0usize;
+    let s = input;
+
+    while let Some(rel_open) = s[cursor..].find('<') {
+        let open_start = cursor + rel_open;
+        let Some(rel_end) = s[open_start..].find('>') else {
+            break;
+        };
+        let open_end = open_start + rel_end;
+
+        let raw_tag = s[open_start + 1..open_end].trim();
+        cursor = open_end + 1;
+
+        if raw_tag.is_empty() || raw_tag.starts_with('/') {
+            continue;
+        }
+
+        let tag_name = raw_tag.split_whitespace().next().unwrap_or("");
+        if !is_valid_xml_tag_name(tag_name) {
+            continue;
+        }
+
+        let close_tag = format!("</{tag_name}>");
+        let Some(rel_close) = s[cursor..].find(&close_tag) else {
+            continue;
+        };
+        let close_start = cursor + rel_close;
+        let inner = s[cursor..close_start].to_string();
+        pairs.push((tag_name.to_string(), inner));
+
+        cursor = close_start + close_tag.len();
+    }
+
+    pairs
+}
+
+/// Parse XML-style tool calls in `<tool_call>` bodies.
+/// Supports both nested argument tags and JSON argument payloads:
+/// - `<memory_recall><query>...</query></memory_recall>`
+/// - `<shell>{"command":"pwd"}</shell>`
+fn parse_xml_tool_calls(xml_content: &str) -> Option<Vec<ParsedToolCall>> {
+    fn parse_inner(content: &str, depth: usize, calls: &mut Vec<ParsedToolCall>) {
+        if depth > 8 {
+            return;
+        }
+
+        for (tag, inner) in extract_xml_tag_pairs(content) {
+            let tool_name = tag.trim().to_string();
+            let inner_content = inner.trim();
+            if inner_content.is_empty() {
+                continue;
+            }
+
+            if is_xml_meta_tag(&tool_name) {
+                parse_inner(inner_content, depth + 1, calls);
+                continue;
+            }
+
+            let mut args = serde_json::Map::new();
+
+            if let Some(first_json) = extract_json_values(inner_content).into_iter().next() {
+                match first_json {
+                    serde_json::Value::Object(object_args) => {
+                        args = object_args;
+                    }
+                    other => {
+                        args.insert("value".to_string(), other);
+                    }
+                }
+            } else {
+                for (key, value) in extract_xml_tag_pairs(inner_content) {
+                    let key = key.trim().to_string();
+                    if is_xml_meta_tag(&key) {
+                        continue;
+                    }
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        args.insert(key, serde_json::Value::String(value.to_string()));
+                    }
+                }
+
+                if args.is_empty() {
+                    args.insert(
+                        "content".to_string(),
+                        serde_json::Value::String(inner_content.to_string()),
+                    );
+                }
+            }
+
+            calls.push(ParsedToolCall {
+                name: tool_name,
+                arguments: serde_json::Value::Object(args),
+            });
+        }
+    }
+
+    let mut calls = Vec::new();
+    let trimmed = xml_content.trim();
+
+    if !trimmed.starts_with('<') || !trimmed.contains('>') {
+        return None;
+    }
+
+    parse_inner(trimmed, 0, &mut calls);
+
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
 }
 
 const TOOL_CALL_OPEN_TAGS: [&str; 4] = ["<tool_call>", "<toolcall>", "<tool-call>", "<invoke>"];
@@ -547,8 +697,18 @@ fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 }
             }
 
+            // If JSON parsing failed, try XML format in the tag body.
             if !parsed_any {
-                tracing::warn!("Malformed <tool_call> JSON: expected tool-call object in tag body");
+                if let Some(xml_calls) = parse_xml_tool_calls(inner) {
+                    calls.extend(xml_calls);
+                    parsed_any = true;
+                }
+            }
+
+            if !parsed_any {
+                tracing::warn!(
+                    "Malformed <tool_call>: expected tool-call object in tag body (JSON/XML)"
+                );
             }
 
             remaining = &after_open[close_idx + close_tag.len()..];
@@ -651,6 +811,199 @@ impl std::error::Error for ToolLoopCancelled {}
 
 pub(crate) fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
     err.chain().any(|source| source.is::<ToolLoopCancelled>())
+}
+
+async fn execute_one_tool_with_policy(
+    call_name: &str,
+    call_arguments: serde_json::Value,
+    tools_registry: &[Box<dyn Tool>],
+    observer: &dyn Observer,
+    policy_engine: Option<&PolicyEngine>,
+    channel_name: Option<&str>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<String> {
+    observer.record_event(&ObserverEvent::ToolCallStart {
+        tool: call_name.to_string(),
+    });
+    let start = Instant::now();
+
+    let Some(tool) = find_tool(tools_registry, call_name) else {
+        return Ok(format!("Unknown tool: {call_name}"));
+    };
+
+    let exec = |arguments: serde_json::Value| async {
+        let tool_future = tool.execute(arguments);
+        let tool_result = if let Some(token) = cancellation_token {
+            tokio::select! {
+                () = token.cancelled() => return Err(ToolLoopCancelled.into()),
+                result = tool_future => result,
+            }
+        } else {
+            tool_future.await
+        };
+
+        match tool_result {
+            Ok(r) => {
+                observer.record_event(&ObserverEvent::ToolCall {
+                    tool: call_name.to_string(),
+                    duration: start.elapsed(),
+                    success: r.success,
+                });
+                if r.success {
+                    Ok(scrub_credentials(&r.output))
+                } else {
+                    Ok(format!("Error: {}", r.error.unwrap_or_else(|| r.output)))
+                }
+            }
+            Err(e) => {
+                observer.record_event(&ObserverEvent::ToolCall {
+                    tool: call_name.to_string(),
+                    duration: start.elapsed(),
+                    success: false,
+                });
+                Ok(format!("Error executing {call_name}: {e}"))
+            }
+        }
+    };
+
+    if let Some(engine) = policy_engine {
+        let decision = engine.evaluate(call_name, channel_name);
+        match decision.action {
+            PolicyAction::Deny => {
+                observer.record_event(&ObserverEvent::ToolCall {
+                    tool: call_name.to_string(),
+                    duration: start.elapsed(),
+                    success: false,
+                });
+                let reason = decision.reason.unwrap_or_default();
+                Ok(format!(
+                    "Error: {} — Tool '{}' denied by policy ({}): {}",
+                    TOOL_PERMISSION_DENIED.diagnostic(),
+                    call_name,
+                    decision.rule_source,
+                    reason
+                ))
+            }
+            PolicyAction::Audit => {
+                tracing::warn!(
+                    tool = %call_name,
+                    channel = channel_name.unwrap_or("(none)"),
+                    rule = %decision.rule_source,
+                    reason = decision.reason.as_deref().unwrap_or(""),
+                    "Policy: AUDIT — tool call logged"
+                );
+                engine.record_call(call_name);
+                exec(call_arguments).await
+            }
+            PolicyAction::Allow => {
+                engine.record_call(call_name);
+                exec(call_arguments).await
+            }
+        }
+    } else {
+        exec(call_arguments).await
+    }
+}
+
+fn should_execute_tools_in_parallel(
+    tool_calls: &[ParsedToolCall],
+    approval: Option<&ApprovalManager>,
+) -> bool {
+    if tool_calls.len() <= 1 {
+        return false;
+    }
+
+    if let Some(mgr) = approval {
+        if tool_calls.iter().any(|call| mgr.needs_approval(&call.name)) {
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn execute_tools_parallel(
+    tool_calls: &[ParsedToolCall],
+    tools_registry: &[Box<dyn Tool>],
+    observer: &dyn Observer,
+    policy_engine: Option<&PolicyEngine>,
+    channel_name: Option<&str>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<Vec<String>> {
+    let futures: Vec<_> = tool_calls
+        .iter()
+        .map(|call| {
+            execute_one_tool_with_policy(
+                &call.name,
+                call.arguments.clone(),
+                tools_registry,
+                observer,
+                policy_engine,
+                channel_name,
+                cancellation_token,
+            )
+        })
+        .collect();
+
+    let results = futures_util::future::join_all(futures).await;
+    results.into_iter().collect()
+}
+
+async fn execute_tools_sequential(
+    tool_calls: &[ParsedToolCall],
+    tools_registry: &[Box<dyn Tool>],
+    observer: &dyn Observer,
+    policy_engine: Option<&PolicyEngine>,
+    channel_name: Option<&str>,
+    approval: Option<&ApprovalManager>,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<Vec<String>> {
+    let mut individual_results: Vec<String> = Vec::with_capacity(tool_calls.len());
+
+    for call in tool_calls {
+        // ── Approval hook ────────────────────────────────
+        if let Some(mgr) = approval {
+            if mgr.needs_approval(&call.name) {
+                let request = ApprovalRequest {
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                };
+
+                // Only prompt interactively on CLI; auto-approve on other channels.
+                let decision = if channel_name == Some("cli") {
+                    mgr.prompt_cli(&request)
+                } else {
+                    ApprovalResponse::Yes
+                };
+
+                mgr.record_decision(
+                    &call.name,
+                    &call.arguments,
+                    decision,
+                    channel_name.unwrap_or("unknown"),
+                );
+
+                if decision == ApprovalResponse::No {
+                    individual_results.push("Denied by user.".to_string());
+                    continue;
+                }
+            }
+        }
+
+        let result = execute_one_tool_with_policy(
+            &call.name,
+            call.arguments.clone(),
+            tools_registry,
+            observer,
+            policy_engine,
+            channel_name,
+            cancellation_token,
+        )
+        .await?;
+        individual_results.push(result);
+    }
+
+    Ok(individual_results)
 }
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
@@ -975,185 +1328,37 @@ pub(crate) async fn run_tool_call_loop(
             let _ = std::io::stdout().flush();
         }
 
-        // Execute each tool call and build results.
-        // `individual_results` tracks per-call output so that native-mode history
-        // can emit one `role: tool` message per tool call with the correct ID.
+        // Execute tool calls and build results. `individual_results` tracks per-call output so
+        // native-mode history can emit one role=tool message per tool call with the correct ID.
+        //
+        // When multiple tool calls are present and interactive CLI approval is not needed, run
+        // tool executions concurrently for lower wall-clock latency.
         let mut tool_results = String::new();
-        let mut individual_results: Vec<String> = Vec::new();
-        for call in &tool_calls {
-            // ── Approval hook ────────────────────────────────
-            if let Some(mgr) = approval {
-                if mgr.needs_approval(&call.name) {
-                    let request = ApprovalRequest {
-                        tool_name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    };
+        let should_parallel = should_execute_tools_in_parallel(&tool_calls, approval);
+        let individual_results = if should_parallel {
+            execute_tools_parallel(
+                &tool_calls,
+                tools_registry,
+                observer,
+                policy_engine,
+                channel_name,
+                cancellation_token.as_ref(),
+            )
+            .await?
+        } else {
+            execute_tools_sequential(
+                &tool_calls,
+                tools_registry,
+                observer,
+                policy_engine,
+                channel_name,
+                approval,
+                cancellation_token.as_ref(),
+            )
+            .await?
+        };
 
-                    // Only prompt interactively on CLI; auto-approve on other channels.
-                    let decision = if channel_name == Some("cli") {
-                        mgr.prompt_cli(&request)
-                    } else {
-                        ApprovalResponse::Yes
-                    };
-
-                    mgr.record_decision(
-                        &call.name,
-                        &call.arguments,
-                        decision,
-                        channel_name.unwrap_or("unknown"),
-                    );
-
-                    if decision == ApprovalResponse::No {
-                        let denied = "Denied by user.".to_string();
-                        individual_results.push(denied.clone());
-                        let _ = writeln!(
-                            tool_results,
-                            "<tool_result name=\"{}\">\n{denied}\n</tool_result>",
-                            call.name
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            observer.record_event(&ObserverEvent::ToolCallStart {
-                tool: call.name.clone(),
-            });
-            let start = Instant::now();
-            let result = if let Some(tool) = find_tool(tools_registry, &call.name) {
-                if let Some(engine) = policy_engine {
-                    let decision = engine.evaluate(&call.name, channel_name);
-                    match decision.action {
-                        PolicyAction::Deny => {
-                            observer.record_event(&ObserverEvent::ToolCall {
-                                tool: call.name.clone(),
-                                duration: start.elapsed(),
-                                success: false,
-                            });
-                            let reason = decision.reason.unwrap_or_default();
-                            format!(
-                                "Error: {} — Tool '{}' denied by policy ({}): {}",
-                                TOOL_PERMISSION_DENIED.diagnostic(),
-                                call.name,
-                                decision.rule_source,
-                                reason
-                            )
-                        }
-                        PolicyAction::Audit => {
-                            tracing::warn!(
-                                tool = %call.name,
-                                channel = channel_name.unwrap_or("(none)"),
-                                rule = %decision.rule_source,
-                                reason = decision.reason.as_deref().unwrap_or(""),
-                                "Policy: AUDIT — tool call logged"
-                            );
-                            engine.record_call(&call.name);
-                            let tool_future = tool.execute(call.arguments.clone());
-                            let tool_result = if let Some(token) = cancellation_token.as_ref() {
-                                tokio::select! {
-                                    () = token.cancelled() => return Err(ToolLoopCancelled.into()),
-                                    result = tool_future => result,
-                                }
-                            } else {
-                                tool_future.await
-                            };
-                            match tool_result {
-                                Ok(r) => {
-                                    observer.record_event(&ObserverEvent::ToolCall {
-                                        tool: call.name.clone(),
-                                        duration: start.elapsed(),
-                                        success: r.success,
-                                    });
-                                    if r.success {
-                                        scrub_credentials(&r.output)
-                                    } else {
-                                        format!("Error: {}", r.error.unwrap_or_else(|| r.output))
-                                    }
-                                }
-                                Err(e) => {
-                                    observer.record_event(&ObserverEvent::ToolCall {
-                                        tool: call.name.clone(),
-                                        duration: start.elapsed(),
-                                        success: false,
-                                    });
-                                    format!("Error executing {}: {e}", call.name)
-                                }
-                            }
-                        }
-                        PolicyAction::Allow => {
-                            engine.record_call(&call.name);
-                            let tool_future = tool.execute(call.arguments.clone());
-                            let tool_result = if let Some(token) = cancellation_token.as_ref() {
-                                tokio::select! {
-                                    () = token.cancelled() => return Err(ToolLoopCancelled.into()),
-                                    result = tool_future => result,
-                                }
-                            } else {
-                                tool_future.await
-                            };
-                            match tool_result {
-                                Ok(r) => {
-                                    observer.record_event(&ObserverEvent::ToolCall {
-                                        tool: call.name.clone(),
-                                        duration: start.elapsed(),
-                                        success: r.success,
-                                    });
-                                    if r.success {
-                                        scrub_credentials(&r.output)
-                                    } else {
-                                        format!("Error: {}", r.error.unwrap_or_else(|| r.output))
-                                    }
-                                }
-                                Err(e) => {
-                                    observer.record_event(&ObserverEvent::ToolCall {
-                                        tool: call.name.clone(),
-                                        duration: start.elapsed(),
-                                        success: false,
-                                    });
-                                    format!("Error executing {}: {e}", call.name)
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let tool_future = tool.execute(call.arguments.clone());
-                    let tool_result = if let Some(token) = cancellation_token.as_ref() {
-                        tokio::select! {
-                            () = token.cancelled() => return Err(ToolLoopCancelled.into()),
-                            result = tool_future => result,
-                        }
-                    } else {
-                        tool_future.await
-                    };
-                    match tool_result {
-                        Ok(r) => {
-                            observer.record_event(&ObserverEvent::ToolCall {
-                                tool: call.name.clone(),
-                                duration: start.elapsed(),
-                                success: r.success,
-                            });
-                            if r.success {
-                                scrub_credentials(&r.output)
-                            } else {
-                                format!("Error: {}", r.error.unwrap_or_else(|| r.output))
-                            }
-                        }
-                        Err(e) => {
-                            observer.record_event(&ObserverEvent::ToolCall {
-                                tool: call.name.clone(),
-                                duration: start.elapsed(),
-                                success: false,
-                            });
-                            format!("Error executing {}: {e}", call.name)
-                        }
-                    }
-                }
-            } else {
-                format!("Unknown tool: {}", call.name)
-            };
-
-            individual_results.push(result.clone());
-
+        for (call, result) in tool_calls.iter().zip(individual_results.iter()) {
             let _ = writeln!(
                 tool_results,
                 "<tool_result name=\"{}\">\n{}\n</tool_result>",
@@ -1341,7 +1546,7 @@ pub async fn run(
         .collect();
 
     // ── Build system prompt from workspace MD files (OpenClaw framework) ──
-    let skills = crate::skills::load_skills(&config.workspace_dir);
+    let skills = crate::skills::load_skills_with_config(&config.workspace_dir, &config);
     let mut tool_descs: Vec<(&str, &str)> = vec![
         (
             "shell",
@@ -1442,8 +1647,10 @@ pub async fn run(
         bootstrap_max_chars,
     );
 
-    // Append structured tool-use instructions with schemas
-    system_prompt.push_str(&build_tool_instructions(&tools_registry));
+    // Append structured tool-use instructions with schemas (only for non-native providers)
+    if !provider.supports_native_tools() {
+        system_prompt.push_str(&build_tool_instructions(&tools_registry));
+    }
 
     // ── Approval manager (supervised mode) ───────────────────────
     let approval_manager = ApprovalManager::from_config(&config.autonomy);
@@ -1453,7 +1660,7 @@ pub async fn run(
 
     if let Some(msg) = message {
         // Auto-save user message to memory
-        if config.memory.auto_save {
+        if config.memory.auto_save && msg.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
             let user_key = autosave_memory_key("user_msg");
             let _ = mem
                 .store(&user_key, &msg, MemoryCategory::Conversation)
@@ -1536,8 +1743,8 @@ pub async fn run(
                 break;
             }
 
-            // Auto-save conversation turns
-            if config.memory.auto_save {
+            // Auto-save conversation turns (skip short/trivial messages)
+            if config.memory.auto_save && user_input.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
                 let user_key = autosave_memory_key("user_msg");
                 let _ = mem
                     .store(&user_key, &user_input, MemoryCategory::Conversation)
@@ -1726,7 +1933,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .map(|b| b.board.clone())
         .collect();
 
-    let skills = crate::skills::load_skills(&config.workspace_dir);
+    let skills = crate::skills::load_skills_with_config(&config.workspace_dir, &config);
     let mut tool_descs: Vec<(&str, &str)> = vec![
         ("shell", "Execute terminal commands."),
         ("file_read", "Read file contents."),
@@ -1783,7 +1990,9 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         Some(&config.identity),
         bootstrap_max_chars,
     );
-    system_prompt.push_str(&build_tool_instructions(&tools_registry));
+    if !provider.supports_native_tools() {
+        system_prompt.push_str(&build_tool_instructions(&tools_registry));
+    }
 
     let mem_context = build_context(mem.as_ref(), message, config.memory.min_relevance_score).await;
     let rag_limit = if config.agent.compact_context { 2 } else { 5 };
