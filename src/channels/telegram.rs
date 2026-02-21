@@ -13,10 +13,14 @@ use tokio::fs;
 
 /// Telegram's maximum message length for text messages
 const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
+/// Reserve space for continuation markers added by send_text_chunks:
+/// worst case is "(continued)\n\n" + chunk + "\n\n(continues...)" = 30 extra chars
+const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
 const TELEGRAM_BIND_COMMAND: &str = "/bind";
 
 /// Split a message into chunks that respect Telegram's 4096 character limit.
 /// Tries to split at word boundaries when possible, and handles continuation.
+/// The effective per-chunk limit is reduced to leave room for continuation markers.
 fn split_message_for_telegram(message: &str) -> Vec<String> {
     if message.chars().count() <= TELEGRAM_MAX_MESSAGE_LENGTH {
         return vec![message.to_string()];
@@ -24,12 +28,20 @@ fn split_message_for_telegram(message: &str) -> Vec<String> {
 
     let mut chunks = Vec::new();
     let mut remaining = message;
+    let chunk_limit = TELEGRAM_MAX_MESSAGE_LENGTH - TELEGRAM_CONTINUATION_OVERHEAD;
 
     while !remaining.is_empty() {
+        // If the remainder fits within the full limit, take it all (last chunk
+        // or single chunk — continuation overhead is at most 14 chars).
+        if remaining.chars().count() <= TELEGRAM_MAX_MESSAGE_LENGTH {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
         // Find the byte offset for the Nth character boundary.
         let hard_split = remaining
             .char_indices()
-            .nth(TELEGRAM_MAX_MESSAGE_LENGTH)
+            .nth(chunk_limit)
             .map_or(remaining.len(), |(idx, _)| idx);
 
         let chunk_end = if hard_split == remaining.len() {
@@ -41,7 +53,7 @@ fn split_message_for_telegram(message: &str) -> Vec<String> {
             // Prefer splitting at newline
             if let Some(pos) = search_area.rfind('\n') {
                 // Don't split if the newline is too close to the start
-                if search_area[..pos].chars().count() >= TELEGRAM_MAX_MESSAGE_LENGTH / 2 {
+                if search_area[..pos].chars().count() >= chunk_limit / 2 {
                     pos + 1
                 } else {
                     // Try space as fallback
@@ -66,7 +78,9 @@ fn split_message_for_telegram(message: &str) -> Vec<String> {
 /// These tags are used internally but must not be sent to Telegram as raw markup,
 /// since Telegram's Markdown parser may reject them (causing status 400 errors).
 fn strip_tool_call_tags(message: &str) -> String {
-    const TOOL_CALL_OPEN_TAGS: [&str; 6] = [
+    const TOOL_CALL_OPEN_TAGS: [&str; 8] = [
+        "<function_calls>",
+        "<function_call>",
         "<tool_call>",
         "<toolcall>",
         "<tool-call>",
@@ -83,6 +97,8 @@ fn strip_tool_call_tags(message: &str) -> String {
 
     fn matching_close_tag(open_tag: &str) -> Option<&'static str> {
         match open_tag {
+            "<function_calls>" => Some("</function_calls>"),
+            "<function_call>" => Some("</function_call>"),
             "<tool_call>" => Some("</tool_call>"),
             "<toolcall>" => Some("</toolcall>"),
             "<tool-call>" => Some("</tool-call>"),
@@ -549,9 +565,29 @@ impl TelegramChannel {
     pub(crate) fn parse_update_message(
         &self,
         update: &serde_json::Value,
-    ) -> Option<ChannelMessage> {
+    ) -> Option<(ChannelMessage, Option<String>)> {
         let message = update.get("message")?;
-        let text = message.get("text").and_then(serde_json::Value::as_str)?;
+
+        // Support both text messages and photo messages (with optional caption)
+        let text_opt = message.get("text").and_then(serde_json::Value::as_str);
+        let caption_opt = message.get("caption").and_then(serde_json::Value::as_str);
+
+        // Extract file_id from photo (highest resolution = last element)
+        let photo_file_id = message
+            .get("photo")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|photos| photos.last())
+            .and_then(|p| p.get("file_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s.to_string());
+
+        // Require at least text, caption, or photo
+        let text = match (text_opt, caption_opt, &photo_file_id) {
+            (Some(t), _, _) => t.to_string(),
+            (None, Some(c), _) => c.to_string(),
+            (None, None, Some(_)) => String::new(),
+            (None, None, None) => return None,
+        };
 
         let username = message
             .get("from")
@@ -585,11 +621,11 @@ impl TelegramChannel {
         let content = if self.mention_only && is_group {
             let bot_username = self.bot_username.lock();
             let bot_username = bot_username.as_ref()?;
-            if !Self::contains_bot_mention(text, bot_username) {
+            if !Self::contains_bot_mention(&text, bot_username) {
                 return None;
             }
 
-            Self::normalize_incoming_content(text, bot_username)?
+            Self::normalize_incoming_content(&text, bot_username)?
         } else {
             text.to_string()
         };
@@ -610,24 +646,73 @@ impl TelegramChannel {
             .and_then(serde_json::Value::as_i64)
             .map(|id| id.to_string());
 
-        let reply_target = if let Some(tid) = thread_id {
-            format!("{}:{}", chat_id, tid)
-        } else {
-            chat_id.clone()
+        let reply_target = match thread_id.as_deref() {
+            Some(tid) => format!("{chat_id}:{tid}"),
+            None => chat_id.clone(),
         };
 
-        Some(ChannelMessage {
-            id: format!("telegram_{chat_id}_{message_id}"),
-            sender: sender_identity,
-            reply_target,
-            content,
-            channel: "telegram".to_string(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            thread_ts: None,
+        Some((
+            ChannelMessage {
+                id: format!("telegram_{chat_id}_{message_id}"),
+                sender: sender_identity,
+                reply_target,
+                content,
+                channel: "telegram".to_string(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                thread_ts: thread_id,
+            },
+            photo_file_id,
+        ))
+    }
+
+    /// Download a Telegram photo by file_id, resize to fit within 512px, and return as base64 data URI.
+    async fn resolve_photo_data_uri(&self, file_id: &str) -> anyhow::Result<String> {
+        use base64::Engine as _;
+
+        // Step 1: call getFile to get file_path
+        let get_file_url = self.api_url(&format!("getFile?file_id={}", file_id));
+        let resp = self.http_client().get(&get_file_url).send().await?;
+        let json: serde_json::Value = resp.json().await?;
+        let file_path = json
+            .get("result")
+            .and_then(|r| r.get("file_path"))
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| anyhow::anyhow!("getFile: no file_path in response"))?
+            .to_string();
+
+        // Step 2: download the actual file
+        let download_url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.bot_token, file_path
+        );
+        let img_resp = self.http_client().get(&download_url).send().await?;
+        let bytes = img_resp.bytes().await?;
+        let input_bytes = bytes.to_vec();
+
+        // Step 3: resize to reduce token/context cost for vision models
+        let resized_bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+            let img = image::load_from_memory(&input_bytes)?;
+            let (w, h) = (img.width(), img.height());
+            let max_dim = 512u32;
+            let resized = if w > max_dim || h > max_dim {
+                img.thumbnail(max_dim, max_dim)
+            } else {
+                img
+            };
+            let mut buf = Vec::new();
+            resized.write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Jpeg,
+            )?;
+            Ok(buf)
         })
+        .await??;
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&resized_bytes);
+        Ok(format!("data:image/jpeg;base64,{}", b64))
     }
 
     async fn handle_unauthorized_message(&self, update: &serde_json::Value) {
@@ -1480,87 +1565,24 @@ Ensure only one `redclaw` process is using this bot token."
                         offset = uid + 1;
                     }
 
-                    let Some(message) = update.get("message") else {
-                        continue;
-                    };
-
-                    let Some(text) = message.get("text").and_then(serde_json::Value::as_str) else {
-                        continue;
-                    };
-
-                    let username = message
-                        .get("from")
-                        .and_then(|from| from.get("username"))
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-
-                    let sender_id = message
-                        .get("from")
-                        .and_then(|from| from.get("id"))
-                        .and_then(serde_json::Value::as_i64)
-                        .map(|id| id.to_string());
-
-                    let sender_identity = if username == "unknown" {
-                        sender_id.clone().unwrap_or_else(|| "unknown".to_string())
-                    } else {
-                        username.clone()
-                    };
-
-                    let mut identities = vec![username.as_str()];
-                    if let Some(id) = sender_id.as_deref() {
-                        identities.push(id);
-                    }
-
-                    if !self.is_any_user_allowed(identities.iter().copied()) {
+                    let Some((mut msg, photo_file_id)) = self.parse_update_message(update) else {
                         self.handle_unauthorized_message(update).await;
                         continue;
+                    };
+
+                    // Resolve photo file_id to data URI and inject as IMAGE marker
+                    if let Some(file_id) = photo_file_id {
+                        if let Ok(data_uri) = self.resolve_photo_data_uri(&file_id).await {
+                            let image_marker = format!("[IMAGE:{}]", data_uri);
+                            if msg.content.is_empty() {
+                                msg.content = image_marker;
+                            } else {
+                                msg.content = format!("{}\n{}", msg.content, image_marker);
+                            }
+                        }
                     }
 
-                    let chat_id = message
-                        .get("chat")
-                        .and_then(|c| c.get("id"))
-                        .and_then(serde_json::Value::as_i64)
-                        .map(|id| id.to_string());
-
-                    let Some(chat_id) = chat_id else {
-                        tracing::warn!("Telegram: missing chat_id in message, skipping");
-                        continue;
-                    };
-
-                    let message_id = message
-                        .get("message_id")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-
-                    let is_group = Self::is_group_message(message);
-                    let content = if self.mention_only && is_group {
-                        let Some(bot_username) = self.get_bot_username().await else {
-                            continue;
-                        };
-                        if !Self::contains_bot_mention(text, &bot_username) {
-                            continue;
-                        }
-                        let Some(normalized) =
-                            Self::normalize_incoming_content(text, &bot_username)
-                        else {
-                            continue;
-                        };
-                        normalized
-                    } else {
-                        text.to_string()
-                    };
-
-                    let thread_id = message
-                        .get("message_thread_id")
-                        .and_then(serde_json::Value::as_i64)
-                        .map(|id| id.to_string());
-
-                    let reply_target = if let Some(tid) = thread_id.as_deref() {
-                        format!("{}:{}", chat_id, tid)
-                    } else {
-                        chat_id.clone()
-                    };
+                    let (chat_id, _) = Self::parse_reply_target(&msg.reply_target);
 
                     // Send "typing" indicator immediately when we receive a message
                     let typing_body = serde_json::json!({
@@ -1573,19 +1595,6 @@ Ensure only one `redclaw` process is using this bot token."
                         .json(&typing_body)
                         .send()
                         .await; // Ignore errors for typing indicator
-
-                    let msg = ChannelMessage {
-                        id: format!("telegram_{chat_id}_{message_id}"),
-                        sender: sender_identity,
-                        reply_target,
-                        content,
-                        channel: "telegram".to_string(),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        thread_ts: thread_id,
-                    };
 
                     if tx.send(msg).await.is_err() {
                         return Ok(());
@@ -2479,6 +2488,7 @@ mod tests {
 
         let parsed = ch
             .parse_update_message(&update)
+            .map(|(m, _)| m)
             .expect("mention should parse");
         assert_eq!(parsed.content, "Hi status please");
 
