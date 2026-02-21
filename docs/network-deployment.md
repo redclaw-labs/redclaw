@@ -11,8 +11,9 @@ This document covers deploying RedClaw on a Raspberry Pi or other host on your l
 | **Telegram polling** | No | RedClaw polls Telegram API; works from anywhere |
 | **Matrix sync (including E2EE)** | No | RedClaw syncs via Matrix client API; no inbound webhook required |
 | **Discord/Slack** | No | Same — outbound only |
-| **Gateway webhook** | Yes | POST /webhook, WhatsApp, etc. need a public URL |
+| **Gateway webhook** | Yes | POST /webhook, /whatsapp, /linq, /nextcloud-talk need a public URL |
 | **Gateway pairing** | Yes | If you pair clients via the gateway |
+| **Alpine/OpenRC service** | No | System-wide background service on Alpine Linux |
 
 **Key:** Telegram, Discord, and Slack use **long-polling** — RedClaw makes outbound requests. No port forwarding or public IP required.
 
@@ -156,7 +157,7 @@ you have a polling conflict. Stop extra instances and restart only one daemon.
 
 ---
 
-## 5. Webhook Channels (WhatsApp, Custom)
+## 5. Webhook Channels (WhatsApp, Nextcloud Talk, Custom)
 
 Webhook-based channels need a **public URL** so Meta (WhatsApp) or your client can POST events.
 
@@ -198,7 +199,104 @@ Configure Cloudflare Tunnel to forward to `127.0.0.1:3000`, then set your webhoo
 
 ---
 
-## 7. References
+## 7. OpenRC (Alpine Linux Service)
+
+RedClaw supports OpenRC for Alpine Linux and other distributions using the OpenRC init system. OpenRC services run **system-wide** and require root/sudo.
+
+### 7.1 Prerequisites
+
+- Alpine Linux (or another OpenRC-based distro)
+- Root or sudo access
+- A dedicated `redclaw` system user (created during install)
+
+### 7.2 Install Service
+
+```bash
+# Install service (OpenRC is auto-detected on Alpine)
+sudo redclaw service install
+```
+
+This creates:
+- Init script: `/etc/init.d/redclaw`
+- Config directory: `/etc/redclaw/`
+- Log directory: `/var/log/redclaw/`
+
+### 7.3 Configuration
+
+Manual config copy is usually not required.
+
+`sudo redclaw service install` automatically prepares `/etc/redclaw`, migrates existing runtime state from your user setup when available, and sets ownership/permissions for the `redclaw` service user.
+
+If no prior runtime state is available to migrate, create `/etc/redclaw/config.toml` before starting the service.
+
+### 7.4 Enable and Start
+
+```bash
+# Add to default runlevel
+sudo rc-update add redclaw default
+
+# Start the service
+sudo rc-service redclaw start
+
+# Check status
+sudo rc-service redclaw status
+```
+
+### 7.5 Manage Service
+
+| Command | Description |
+|---------|-------------|
+| `sudo rc-service redclaw start` | Start the daemon |
+| `sudo rc-service redclaw stop` | Stop the daemon |
+| `sudo rc-service redclaw status` | Check service status |
+| `sudo rc-service redclaw restart` | Restart the daemon |
+| `sudo redclaw service status` | RedClaw status wrapper (uses `/etc/redclaw` config) |
+
+### 7.6 Logs
+
+OpenRC routes logs to:
+
+| Log | Path |
+|-----|------|
+| Access/stdout | `/var/log/redclaw/access.log` |
+| Errors/stderr | `/var/log/redclaw/error.log` |
+
+View logs:
+
+```bash
+sudo tail -f /var/log/redclaw/error.log
+```
+
+### 7.7 Uninstall
+
+```bash
+# Stop and remove from runlevel
+sudo rc-service redclaw stop
+sudo rc-update del redclaw default
+
+# Remove init script
+sudo redclaw service uninstall
+```
+
+### 7.8 Notes
+
+- OpenRC is **system-wide only** (no user-level services)
+- Requires `sudo` or root for all service operations
+- The service runs as the `redclaw:redclaw` user (least privilege)
+- Config must be at `/etc/redclaw/config.toml` (explicit path in init script)
+- If the `redclaw` user does not exist, install will fail with instructions to create it
+
+### 7.9 Checklist: Alpine/OpenRC Deployment
+
+- [ ] Install: `sudo redclaw service install`
+- [ ] Enable: `sudo rc-update add redclaw default`
+- [ ] Start: `sudo rc-service redclaw start`
+- [ ] Verify: `sudo rc-service redclaw status`
+- [ ] Check logs: `/var/log/redclaw/error.log`
+
+---
+
+## 8. References
 
 - [channels-reference.md](./channels-reference.md) — Channel configuration overview
 - [matrix-e2ee-guide.md](./matrix-e2ee-guide.md) — Matrix setup and encrypted-room troubleshooting
