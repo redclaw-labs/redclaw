@@ -22,6 +22,7 @@ pub mod delegate;
 pub mod file_read;
 pub mod file_write;
 pub mod git_operations;
+pub mod glob_search;
 pub mod hardware_board_info;
 pub mod hardware_memory_map;
 pub mod hardware_memory_read;
@@ -30,6 +31,7 @@ pub mod image_info;
 pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
+pub mod pdf_read;
 pub mod proxy_config;
 pub mod schedule;
 pub mod screenshot;
@@ -44,6 +46,7 @@ pub use delegate::DelegateTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
 pub use git_operations::GitOperationsTool;
+pub use glob_search::GlobSearchTool;
 pub use hardware_board_info::HardwareBoardInfoTool;
 pub use hardware_memory_map::HardwareMemoryMapTool;
 pub use hardware_memory_read::HardwareMemoryReadTool;
@@ -52,6 +55,7 @@ pub use image_info::ImageInfoTool;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
+pub use pdf_read::PdfReadTool;
 pub use proxy_config::ProxyConfigTool;
 pub use schedule::ScheduleTool;
 pub use screenshot::ScreenshotTool;
@@ -65,8 +69,43 @@ use crate::config::DelegateAgentConfig;
 use crate::memory::Memory;
 use crate::runtime::{NativeRuntime, RuntimeAdapter};
 use crate::security::SecurityPolicy;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Clone)]
+struct ArcDelegatingTool {
+    inner: Arc<dyn Tool>,
+}
+
+impl ArcDelegatingTool {
+    fn boxed(inner: Arc<dyn Tool>) -> Box<dyn Tool> {
+        Box::new(Self { inner })
+    }
+}
+
+#[async_trait]
+impl Tool for ArcDelegatingTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        self.inner.execute(args).await
+    }
+}
+
+fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
+    tools.into_iter().map(ArcDelegatingTool::boxed).collect()
+}
 
 /// Create the default tool registry
 pub fn default_tools(security: Arc<SecurityPolicy>) -> Vec<Box<dyn Tool>> {
@@ -81,7 +120,8 @@ pub fn default_tools_with_runtime(
     vec![
         Box::new(ShellTool::new(security.clone(), runtime)),
         Box::new(FileReadTool::new(security.clone())),
-        Box::new(FileWriteTool::new(security)),
+        Box::new(FileWriteTool::new(security.clone())),
+        Box::new(GlobSearchTool::new(security)),
     ]
 }
 
@@ -131,16 +171,17 @@ pub fn all_tools_with_runtime(
 ) -> Vec<Box<dyn Tool>> {
     let config_arc = Arc::new(config.clone());
 
-    let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(ShellTool::new(security.clone(), runtime)),
-        Box::new(FileReadTool::new(security.clone())),
-        Box::new(FileWriteTool::new(security.clone())),
-        Box::new(MemoryStoreTool::new(memory.clone(), security.clone())),
-        Box::new(MemoryRecallTool::new(memory.clone())),
-        Box::new(MemoryForgetTool::new(memory, security.clone())),
-        Box::new(ScheduleTool::new(security.clone(), config.clone())),
-        Box::new(ProxyConfigTool::new(config_arc.clone(), security.clone())),
-        Box::new(GitOperationsTool::new(
+    let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(ShellTool::new(security.clone(), runtime)),
+        Arc::new(FileReadTool::new(security.clone())),
+        Arc::new(FileWriteTool::new(security.clone())),
+        Arc::new(GlobSearchTool::new(security.clone())),
+        Arc::new(MemoryStoreTool::new(memory.clone(), security.clone())),
+        Arc::new(MemoryRecallTool::new(memory.clone())),
+        Arc::new(MemoryForgetTool::new(memory, security.clone())),
+        Arc::new(ScheduleTool::new(security.clone(), config.clone())),
+        Arc::new(ProxyConfigTool::new(config_arc.clone(), security.clone())),
+        Arc::new(GitOperationsTool::new(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
@@ -148,12 +189,12 @@ pub fn all_tools_with_runtime(
 
     if browser_config.enabled {
         // Add legacy browser_open tool for simple URL opening
-        tools.push(Box::new(BrowserOpenTool::new(
+        tool_arcs.push(Arc::new(BrowserOpenTool::new(
             security.clone(),
             browser_config.allowed_domains.clone(),
         )));
         // Add full browser automation tool (pluggable backend)
-        tools.push(Box::new(BrowserTool::new_with_backend(
+        tool_arcs.push(Arc::new(BrowserTool::new_with_backend(
             security.clone(),
             browser_config.allowed_domains.clone(),
             browser_config.session_name.clone(),
@@ -174,7 +215,7 @@ pub fn all_tools_with_runtime(
     }
 
     if http_config.enabled {
-        tools.push(Box::new(HttpRequestTool::new(
+        tool_arcs.push(Arc::new(HttpRequestTool::new(
             security.clone(),
             http_config.allowed_domains.clone(),
             http_config.max_response_size,
@@ -199,7 +240,7 @@ pub fn all_tools_with_runtime(
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(15);
-        tools.push(Box::new(WebSearchTool::new(
+        tool_arcs.push(Arc::new(WebSearchTool::new(
             provider,
             brave_api_key,
             max_results,
@@ -207,13 +248,16 @@ pub fn all_tools_with_runtime(
         )));
     }
 
+    // PDF extraction (feature-gated at compile time via rag-pdf)
+    tool_arcs.push(Arc::new(PdfReadTool::new(security.clone())));
+
     // Vision tools are always available
-    tools.push(Box::new(ScreenshotTool::new(security.clone())));
-    tools.push(Box::new(ImageInfoTool::new(security.clone())));
+    tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
+    tool_arcs.push(Arc::new(ImageInfoTool::new(security.clone())));
 
     if let Some(key) = composio_key {
         if !key.is_empty() {
-            tools.push(Box::new(ComposioTool::new(
+            tool_arcs.push(Arc::new(ComposioTool::new(
                 key,
                 composio_entity_id,
                 security.clone(),
@@ -227,7 +271,8 @@ pub fn all_tools_with_runtime(
             .iter()
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
             .collect();
-        tools.push(Box::new(DelegateTool::new_with_options(
+        let parent_tools = Arc::new(tool_arcs.clone());
+        let delegate_tool = DelegateTool::new_with_options(
             delegate_agents,
             fallback_api_key.map(String::from),
             security.clone(),
@@ -237,10 +282,13 @@ pub fn all_tools_with_runtime(
                 secrets_encrypt: config.secrets.encrypt,
                 reasoning_enabled: None,
             },
-        )));
+        )
+        .with_parent_tools(parent_tools)
+        .with_multimodal_config(config.multimodal.clone());
+        tool_arcs.push(Arc::new(delegate_tool));
     }
 
-    tools
+    boxed_registry_from_arcs(tool_arcs)
 }
 
 #[cfg(test)]
@@ -258,10 +306,10 @@ mod tests {
     }
 
     #[test]
-    fn default_tools_has_three() {
+    fn default_tools_has_expected_count() {
         let security = Arc::new(SecurityPolicy::default());
         let tools = default_tools(security);
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
     }
 
     #[test]
@@ -347,6 +395,7 @@ mod tests {
         assert!(names.contains(&"shell"));
         assert!(names.contains(&"file_read"));
         assert!(names.contains(&"file_write"));
+        assert!(names.contains(&"glob_search"));
     }
 
     #[test]
@@ -458,6 +507,9 @@ mod tests {
                 api_key: None,
                 temperature: None,
                 max_depth: 3,
+                agentic: false,
+                allowed_tools: Vec::new(),
+                max_iterations: 10,
             },
         );
 
