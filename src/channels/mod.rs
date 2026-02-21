@@ -25,6 +25,7 @@ pub mod linq;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 pub mod mattermost;
+pub mod nextcloud_talk;
 pub mod qq;
 pub mod signal;
 pub mod slack;
@@ -47,6 +48,7 @@ pub use linq::LinqChannel;
 #[cfg(feature = "channel-matrix")]
 pub use matrix::MatrixChannel;
 pub use mattermost::MattermostChannel;
+pub use nextcloud_talk::NextcloudTalkChannel;
 pub use qq::QQChannel;
 pub use signal::SignalChannel;
 pub use slack::SlackChannel;
