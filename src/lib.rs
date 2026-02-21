@@ -85,6 +85,8 @@ pub enum ServiceCommands {
     Start,
     /// Stop daemon service
     Stop,
+    /// Restart daemon service to apply latest config
+    Restart,
     /// Check daemon service status
     Status,
     /// Uninstall daemon service unit
@@ -291,6 +293,45 @@ Examples:
     },
 }
 
+/// Memory management subcommands
+#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemoryCommands {
+    /// List memory entries with optional filters
+    List {
+        /// Filter by category (core, daily, conversation, or custom name)
+        #[arg(long)]
+        category: Option<String>,
+        /// Filter by session ID
+        #[arg(long)]
+        session: Option<String>,
+        /// Maximum number of entries to display
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Number of entries to skip (for pagination)
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// Get a specific memory entry by key
+    Get {
+        /// Memory key to look up
+        key: String,
+    },
+    /// Show memory backend statistics and health
+    Stats,
+    /// Clear memories by category, by key, or clear all
+    Clear {
+        /// Delete a single entry by key (supports prefix match)
+        #[arg(long)]
+        key: Option<String>,
+        /// Only clear entries in this category
+        #[arg(long)]
+        category: Option<String>,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Integration subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IntegrationCommands {
@@ -396,6 +437,12 @@ Examples:
         /// Uno Q IP (e.g. 192.168.0.48). If omitted, assumes running ON the Uno Q.
         #[arg(long)]
         host: Option<String>,
+    },
+    /// Deploy RedClaw binary + config to Arduino Uno Q (cross-compiled aarch64)
+    DeployUnoQ {
+        /// Uno Q IP or user@host (e.g. 192.168.0.48 or arduino@192.168.0.48)
+        #[arg(long)]
+        host: String,
     },
     /// Flash RedClaw firmware to Nucleo-F401RE (builds + probe-rs run)
     FlashNucleo,
