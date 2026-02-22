@@ -24,7 +24,7 @@
 <p align="center">
   <a href="bootstrap.sh">Cài đặt 1 lệnh</a> |
   <a href="docs/getting-started/README.md">Hướng dẫn cài đặt</a> |
-  <a href="docs/README.vi.md">Tổng quan tài liệu</a> |
+  <a href="docs/vi/README.md">Tổng quan tài liệu</a> |
   <a href="docs/SUMMARY.md">Mục lục tài liệu</a>
 </p>
 
@@ -280,7 +280,7 @@ allow_public_bind = false
 
 - Tổng quan docs (English): [`docs/README.md`](docs/README.md)
 - Mục lục thống nhất (TOC): [`docs/SUMMARY.md`](docs/SUMMARY.md)
-- Tổng quan docs (Tiếng Việt): [`docs/README.vi.md`](docs/README.vi.md)
+- Tổng quan docs (Tiếng Việt): [`docs/vi/README.md`](docs/vi/README.md)
 - Command reference: [`docs/commands-reference.md`](docs/commands-reference.md)
 - Config reference: [`docs/config-reference.md`](docs/config-reference.md)
 - Provider reference: [`docs/providers-reference.md`](docs/providers-reference.md)
