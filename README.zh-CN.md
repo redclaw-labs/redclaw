@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="redclaw.png" alt="RedClaw" width="200" />
+  <img src="logo.png" alt="RedClaw" width="200" />
 </p>
 
 <h1 align="center">RedClaw 🦀（简体中文）</h1>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  🌐 语言：<a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a>
+  🌐 语言：<a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -84,7 +84,7 @@ RedClaw 是一个高性能、低资源占用、可组合的自主智能体运行
 > 说明：RedClaw 的数据来自 release 构建，并通过 `/usr/bin/time -l` 测得。OpenClaw 需要 Node.js 运行时环境，仅该运行时通常就会带来约 390MB 的额外内存占用；NanoBot 需要 Python 运行时环境。PicoClaw 与 RedClaw 为静态二进制。
 
 <p align="center">
-  <img src="red-claw.jpeg" alt="RedClaw vs OpenClaw 对比图" width="800" />
+  <img src="benchmark.jpeg" alt="RedClaw vs OpenClaw 对比图" width="800" />
 </p>
 
 ### 本地可复现测量

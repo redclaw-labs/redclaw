@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="redclaw.png" alt="RedClaw" width="200" />
+  <img src="logo.png" alt="RedClaw" width="200" />
 </p>
 
 <h1 align="center">RedClaw 🦀（日本語）</h1>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  🌐 言語: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a>
+  🌐 言語: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -84,7 +84,7 @@ RedClaw は、高速・省リソース・高拡張性を重視した自律エー
 > 注記: RedClaw の結果は release ビルドを `/usr/bin/time -l` で計測したものです。OpenClaw は Node.js ランタイムが必要で、ランタイム由来だけで通常は約390MBの追加メモリを要します。NanoBot は Python ランタイムが必要です。PicoClaw と RedClaw は静的バイナリです。
 
 <p align="center">
-  <img src="red-claw.jpeg" alt="RedClaw vs OpenClaw Comparison" width="800" />
+  <img src="benchmark.jpeg" alt="RedClaw vs OpenClaw Comparison" width="800" />
 </p>
 
 ### ローカルで再現可能な測定

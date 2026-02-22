@@ -90,3 +90,4 @@ Trang này là điểm vào tiếng Việt cho hệ thống tài liệu.
 - 简体中文: [README.zh-CN.md](README.zh-CN.md)
 - 日本語: [README.ja.md](README.ja.md)
 - Русский: [README.ru.md](README.ru.md)
+- Français: [README.fr.md](README.fr.md)

@@ -88,3 +88,4 @@
 - 日本語: [README.ja.md](README.ja.md)
 - Русский: [README.ru.md](README.ru.md)
 - Tiếng Việt: [README.vi.md](README.vi.md)
+- Français: [README.fr.md](README.fr.md)

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="redclaw.png" alt="RedClaw" width="200" />
+  <img src="logo.png" alt="RedClaw" width="200" />
 </p>
 
 <h1 align="center">RedClaw 🦀（Русский）</h1>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  🌐 Языки: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a>
+  🌐 Языки: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -84,7 +84,7 @@ RedClaw — это производительная и расширяемая и
 > Примечание: результаты RedClaw получены на release-сборке с помощью `/usr/bin/time -l`. OpenClaw требует Node.js runtime; только этот runtime обычно добавляет около 390MB дополнительного потребления памяти. NanoBot требует Python runtime. PicoClaw и RedClaw — статические бинарники.
 
 <p align="center">
-  <img src="red-claw.jpeg" alt="Сравнение RedClaw и OpenClaw" width="800" />
+  <img src="benchmark.jpeg" alt="Сравнение RedClaw и OpenClaw" width="800" />
 </p>
 
 ### Локально воспроизводимое измерение
