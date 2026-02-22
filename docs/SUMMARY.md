@@ -15,7 +15,7 @@ Last refreshed: **February 22, 2026**.
 - Chinese Docs Hub: [README.zh-CN.md](README.zh-CN.md)
 - Japanese Docs Hub: [README.ja.md](README.ja.md)
 - Russian Docs Hub: [README.ru.md](README.ru.md)
-- Vietnamese Docs Hub: [README.vi.md](README.vi.md)
+- Vietnamese Docs Hub: [vi/README.md](vi/README.md)
 - French Docs Hub: [README.fr.md](README.fr.md)
 
 ## Collections
