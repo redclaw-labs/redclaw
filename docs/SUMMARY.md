@@ -16,6 +16,7 @@ Last refreshed: **February 18, 2026**.
 - Japanese Docs Hub: [README.ja.md](README.ja.md)
 - Russian Docs Hub: [README.ru.md](README.ru.md)
 - Vietnamese Docs Hub: [README.vi.md](README.vi.md)
+- French Docs Hub: [README.fr.md](README.fr.md)
 
 ## Collections
 
@@ -28,6 +29,7 @@ Last refreshed: **February 18, 2026**.
 
 - [reference/README.md](reference/README.md)
 - [commands-reference.md](commands-reference.md)
+- [error-codes.md](error-codes.md)
 - [providers-reference.md](providers-reference.md)
 - [channels-reference.md](channels-reference.md)
 - [nextcloud-talk-setup.md](nextcloud-talk-setup.md)
@@ -40,8 +42,10 @@ Last refreshed: **February 18, 2026**.
 
 - [operations/README.md](operations/README.md)
 - [operations-runbook.md](operations-runbook.md)
+- [proxy-agent-playbook.md](proxy-agent-playbook.md)
 - [release-process.md](release-process.md)
 - [troubleshooting.md](troubleshooting.md)
+- [matrix-e2ee-guide.md](matrix-e2ee-guide.md)
 - [network-deployment.md](network-deployment.md)
 - [mattermost-setup.md](mattermost-setup.md)
 
@@ -64,6 +68,7 @@ Last refreshed: **February 18, 2026**.
 - [arduino-uno-q-setup.md](arduino-uno-q-setup.md)
 - [datasheets/nucleo-f401re.md](datasheets/nucleo-f401re.md)
 - [datasheets/arduino-uno.md](datasheets/arduino-uno.md)
+- [datasheets/arduino-uno-q.md](datasheets/arduino-uno-q.md)
 - [datasheets/esp32.md](datasheets/esp32.md)
 
 ### 6) Contribution & CI
