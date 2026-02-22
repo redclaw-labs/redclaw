@@ -203,9 +203,9 @@ Mỗi subsystem là một **Trait** — thay thế triển khai bằng cấu hì
 | Subsystem | Trait | Triển khai tích hợp | Cách mở rộng |
 |--------|-------|----------|----------|
 | **AI model** | `Provider` | Xem qua `redclaw providers` (hiện có 28 built-in + alias, và hỗ trợ custom endpoint) | `custom:https://your-api.com` (OpenAI-compatible) hoặc `anthropic-custom:https://your-api.com` |
-| **Kênh** | `Channel` | CLI, Telegram, Discord, Slack, Mattermost, iMessage, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ, Webhook | Bất kỳ messaging API |
+| **Kênh** | `Channel` | 16 kênh: CLI, Telegram, Discord, Slack, Mattermost, iMessage, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ, Webhook, Nextcloud Talk | Bất kỳ messaging API |
 | **Bộ nhớ** | `Memory` | SQLite hybrid search, PostgreSQL backend, Lucid bridge, Markdown file, explicit `none` backend, snapshot/hydrate, optional response cache | Bất kỳ backend lưu trữ |
-| **Tool** | `Tool` | shell/file/memory, cron/schedule, git, pushover, browser, http_request, screenshot/image_info, composio (opt-in), delegate, tool phần cứng | Bất kỳ năng lực |
+| **Tool** | `Tool` | 22 công cụ: shell/file/memory, cron/schedule, git, pushover, browser, http_request, screenshot/image_info, composio (opt-in), delegate, tool phần cứng | Bất kỳ năng lực |
 | **Quan sát** | `Observer` | Noop, Log, Multi | Prometheus, OTel |
 | **Runtime** | `RuntimeAdapter` | Native, Docker (sandbox) | Thêm qua adapter; kind không hỗ trợ sẽ fail-fast |
 | **Bảo mật** | `SecurityPolicy` | Gateway pairing, sandbox, allowlist, rate limits, filesystem scoping, mã hóa secrets | — |
@@ -261,7 +261,7 @@ keyword_weight = 0.3
 ```toml
 api_key = "sk-..."
 default_provider = "openrouter"
-default_model = "anthropic/claude-sonnet-4-6"
+default_model = "anthropic/claude-sonnet-4.6"
 default_temperature = 0.7
 
 [memory]
