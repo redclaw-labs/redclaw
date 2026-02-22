@@ -102,6 +102,7 @@ Nếu `[channels_config.matrix]` có mặt nhưng binary được build mà khô
 | Matrix | sync API (hỗ trợ E2EE) | Không |
 | Signal | signal-cli HTTP bridge | Không (endpoint bridge cục bộ) |
 | WhatsApp | webhook (Cloud API) hoặc websocket (Web mode) | Cloud API: Có (HTTPS callback công khai), Web mode: Không |
+| Nextcloud Talk | webhook (`/nextcloud-talk`) | Có (cần HTTPS callback công khai) |
 | Webhook | gateway endpoint (`/webhook`) | Thường là có |
 | Email | IMAP polling + SMTP send | Không |
 | IRC | IRC socket | Không |
@@ -122,7 +123,7 @@ Với các channel có allowlist người gửi:
 
 Tên trường khác nhau theo channel:
 
-- `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/DingTalk/QQ)
+- `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/DingTalk/QQ/Nextcloud Talk)
 - `allowed_from` (Signal)
 - `allowed_numbers` (WhatsApp)
 - `allowed_senders` (Email)
@@ -336,7 +337,23 @@ app_secret = "qq-app-secret"
 allowed_users = ["*"]
 ```
 
-### 4.14 iMessage
+### 4.14 Nextcloud Talk
+
+```toml
+[channels_config.nextcloud_talk]
+server_url = "https://cloud.example.com"    # URL máy chủ Nextcloud
+username = "redclaw-bot"                     # Tên đăng nhập bot
+password = "app-password"                    # Mật khẩu ứng dụng
+allowed_users = ["user1", "user2"]           # Người dùng được phép, hoặc ["*"] cho tất cả
+```
+
+Nextcloud Talk kết nối RedClaw với hệ thống cộng tác Nextcloud qua API Talk.
+
+**Chế độ nhận:** Polling — kiểm tra tin nhắn mới định kỳ.
+
+**Bảo mật:** Sử dụng mật khẩu ứng dụng (app password), không phải mật khẩu tài khoản chính.
+
+### 4.15 iMessage
 
 ```toml
 [channels_config.imessage]

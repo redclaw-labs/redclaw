@@ -117,6 +117,7 @@ If `[channels_config.matrix]` or `[channels_config.lark]` is present but the cor
 | DingTalk | stream mode | No |
 | QQ | bot gateway | No |
 | iMessage | local integration | No |
+| Linq | webhook (`/linq`) | Yes (public HTTPS endpoint required for webhook delivery) |
 
 ---
 
@@ -135,6 +136,7 @@ Field names differ by channel:
 - `allowed_numbers` (WhatsApp)
 - `allowed_senders` (Email)
 - `allowed_contacts` (iMessage)
+- Linq: `allowed_senders` — array of phone numbers (E.164 format) or `["*"]` for all
 
 ---
 
@@ -369,6 +371,26 @@ Notes:
 allowed_contacts = ["*"]
 ```
 
+### 4.16 Linq (iMessage / RCS / SMS)
+
+```toml
+[channels_config.linq]
+api_token = "linq-partner-api-token"         # Linq Partner V3 API token (Bearer auth)
+from_phone = "+15551234567"                   # Originating phone number (E.164 format)
+signing_secret = "optional-webhook-secret"    # HMAC-SHA256 webhook signature verification
+allowed_senders = ["+1234567890"]             # Allowed sender phone numbers, or ["*"] for all
+```
+
+Linq connects RedClaw to iMessage, RCS, and SMS via the [Linq Partner V3 API](https://www.linqapp.com).
+
+**Receive mode:** Webhook — messages are pushed to the gateway's `/linq` endpoint. The gateway must be publicly reachable over HTTPS.
+
+**Webhook signature verification:** If `signing_secret` is set, incoming webhooks are verified using HMAC-SHA256 over `"{timestamp}.{body}"`. Requests older than 300 seconds are rejected.
+
+**Typing indicators:** Supported. Start/stop typing are sent via the Linq API.
+
+**Media:** Inbound images (`image/*` MIME types) are converted to `[IMAGE:url]` markers in message text.
+
 ---
 
 ## 5. Validation Workflow
@@ -439,6 +461,7 @@ rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|D
 | QQ | `QQ: connected and identified` | `QQ: ignoring C2C message from unauthorized user:` / `QQ: ignoring group message from unauthorized user:` | `QQ: received Reconnect (op 7)` / `QQ: received Invalid Session (op 9)` / `QQ: message channel closed` |
 | Nextcloud Talk (gateway) | `POST /nextcloud-talk — Nextcloud Talk bot webhook` | `Nextcloud Talk webhook signature verification failed` / `Nextcloud Talk: ignoring message from unauthorized actor:` | `Nextcloud Talk send failed:` / `LLM error for Nextcloud Talk message:` |
 | iMessage | `iMessage channel listening (AppleScript bridge)...` | (contact allowlist enforced by `allowed_contacts`) | `iMessage poll error:` |
+| Linq | `Linq channel active` | `Linq: ignoring message from unauthorized sender` | `Linq send failed` / `Linq create chat failed` |
 
 ### 7.3 Runtime supervisor keywords
 
