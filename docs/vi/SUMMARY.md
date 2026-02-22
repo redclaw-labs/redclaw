@@ -8,6 +8,8 @@
 
 - README tiếng Việt: [../../README.vi.md](../../README.vi.md)
 - Docs hub tiếng Việt: [README.md](README.md)
+- [Mẫu tài liệu](doc-template.md)
+- [Bảng kiểm kê tài liệu](docs-inventory.md)
 
 ## Danh mục
 

@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  🌐 Языки: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
+  🌐 Языки: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -198,7 +198,8 @@ redclaw agent --provider anthropic -m "hello"
 | Подсистема | Trait | Встроенные реализации | Расширение |
 |-----------|-------|---------------------|------------|
 | **AI-модели** | `Provider` | Каталог через `redclaw providers` (сейчас 28 встроенных + алиасы, плюс пользовательские endpoint) | `custom:https://your-api.com` (OpenAI-совместимый) или `anthropic-custom:https://your-api.com` |
-| **Каналы** | `Channel` | 16 каналов: CLI, Telegram, Discord, Slack, Mattermost, iMessage, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ, Webhook, Nextcloud Talk | Любой messaging API |
+| **Каналы** | `Channel` | 16 каналов: CLI, Telegram, Discord, Slack, Mattermost, Linq, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ | Любой messaging API |
+|  |  | Webhook, Nextcloud Talk |  |
 | **Память** | `Memory` | SQLite гибридный поиск, PostgreSQL-бэкенд, Lucid-мост, Markdown-файлы, явный `none`-бэкенд, snapshot/hydrate, опциональный кэш ответов | Любой persistence-бэкенд |
 | **Инструменты** | `Tool` | 22 инструмента: shell/file/memory, cron/schedule, git, pushover, browser, http_request, screenshot/image_info, composio (opt-in), delegate, аппаратные инструменты | Любая функциональность |
 | **Наблюдаемость** | `Observer` | Noop, Log, Multi | Prometheus, OTel |

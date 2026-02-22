@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  🌐 语言：<a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
+  🌐 语言：<a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -203,7 +203,8 @@ redclaw agent --provider anthropic -m "hello"
 | 子系统 | Trait | 内置实现 | 扩展方式 |
 |--------|-------|----------|----------|
 | **AI 模型** | `Provider` | 通过 `redclaw providers` 查看（当前 28 个内置 + 别名，以及自定义端点） | `custom:https://your-api.com`（OpenAI 兼容）或 `anthropic-custom:https://your-api.com` |
-| **通道** | `Channel` | 16 个通道：CLI, Telegram, Discord, Slack, Mattermost, iMessage, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ, Webhook, Nextcloud Talk | 任意消息 API |
+| **通道** | `Channel` | 16 个通道：CLI, Telegram, Discord, Slack, Mattermost, Linq, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ | 任意消息 API |
+|  |  | Webhook, Nextcloud Talk |  |
 | **记忆** | `Memory` | SQLite 混合搜索, PostgreSQL 后端, Lucid 桥接, Markdown 文件, 显式 `none` 后端, 快照/恢复, 可选响应缓存 | 任意持久化后端 |
 | **工具** | `Tool` | 22 个工具：shell/file/memory, cron/schedule, git, pushover, browser, http_request, screenshot/image_info, composio (opt-in), delegate, 硬件工具 | 任意能力 |
 | **可观测性** | `Observer` | Noop, Log, Multi | Prometheus, OTel |

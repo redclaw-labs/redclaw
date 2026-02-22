@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  🌐 Ngôn ngữ: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
+  🌐 Ngôn ngữ: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -203,7 +203,8 @@ Mỗi subsystem là một **Trait** — thay thế triển khai bằng cấu hì
 | Subsystem | Trait | Triển khai tích hợp | Cách mở rộng |
 |--------|-------|----------|----------|
 | **AI model** | `Provider` | Xem qua `redclaw providers` (hiện có 28 built-in + alias, và hỗ trợ custom endpoint) | `custom:https://your-api.com` (OpenAI-compatible) hoặc `anthropic-custom:https://your-api.com` |
-| **Kênh** | `Channel` | 16 kênh: CLI, Telegram, Discord, Slack, Mattermost, iMessage, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ, Webhook, Nextcloud Talk | Bất kỳ messaging API |
+| **Kênh** | `Channel` | 16 kênh: CLI, Telegram, Discord, Slack, Mattermost, Linq, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ | Bất kỳ messaging API |
+|  |  | Webhook, Nextcloud Talk |  |
 | **Bộ nhớ** | `Memory` | SQLite hybrid search, PostgreSQL backend, Lucid bridge, Markdown file, explicit `none` backend, snapshot/hydrate, optional response cache | Bất kỳ backend lưu trữ |
 | **Tool** | `Tool` | 22 công cụ: shell/file/memory, cron/schedule, git, pushover, browser, http_request, screenshot/image_info, composio (opt-in), delegate, tool phần cứng | Bất kỳ năng lực |
 | **Quan sát** | `Observer` | Noop, Log, Multi | Prometheus, OTel |

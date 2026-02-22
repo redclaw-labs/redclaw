@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  🌐 Languages: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="docs/README.fr.md">Français</a>
+  🌐 Languages: <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -172,14 +172,14 @@ Custom endpoints:
 - WhatsApp
 - Matrix
 - IRC
-- iMessage
+- Linq
 - Email
 - Signal
 - Mattermost
 - Nextcloud Talk
 - DingTalk
 - Lark
-- Webhook (Linq)
+- Webhook
 - QQ
 
 <a name="tools"></a>
@@ -312,7 +312,8 @@ Every subsystem is a **Trait** — swap implementations with config, without rew
 | Subsystem | Trait | Built-in implementations | Extension path |
 |--------|-------|----------|----------|
 | **AI model** | `Provider` | See `redclaw providers` (built-in providers + aliases, plus custom endpoints) | `custom:https://your-api.com` (OpenAI-compatible) or `anthropic-custom:https://your-api.com` |
-| **Channels** | `Channel` | CLI, Telegram, Discord, Slack, Mattermost, iMessage, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ, Webhook (Linq), Nextcloud Talk | Any messaging API |
+| **Channels** | `Channel` | CLI, Telegram, Discord, Slack, Mattermost, Linq, Matrix, Signal, WhatsApp, Email, IRC, Lark, DingTalk, QQ | Any messaging API |
+|  |  | Webhook, Nextcloud Talk |  |
 | **Memory** | `Memory` | SQLite hybrid search, PostgreSQL backend, Lucid bridge, Markdown file, explicit `none` backend, snapshot/hydrate, optional response cache | Any persistence backend |
 | **Tools** | `Tool` | shell/file/memory, cron/schedule, git, proxy_config, browser, http_request, screenshot/image_info, composio (opt-in), delegate, hardware tools | Any capability |
 | **Observability** | `Observer` | Noop, Log, Multi | Prometheus, OTel |
