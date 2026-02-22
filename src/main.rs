@@ -218,8 +218,8 @@ Examples:
     redclaw gateway -p 0             # random available port")]
     Gateway {
         /// Port to listen on (use 0 for random available port)
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
+        #[arg(short, long)]
+        port: Option<u16>,
 
         /// Host to bind to
         #[arg(long, default_value = "127.0.0.1")]
@@ -244,8 +244,8 @@ Examples:
     redclaw daemon --host 127.0.0.1  # localhost only")]
     Daemon {
         /// Port to listen on (use 0 for random available port)
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
+        #[arg(short, long)]
+        port: Option<u16>,
 
         /// Host to bind to
         #[arg(long, default_value = "127.0.0.1")]
@@ -811,6 +811,7 @@ async fn main() -> Result<()> {
         Commands::Gateway { port, host } => {
             print_banner();
             print_service_start("Gateway");
+            let port = port.unwrap_or(config.gateway.port);
             if port == 0 {
                 tracing::info!("Starting Gateway on {host} (random port)");
             } else {
@@ -822,6 +823,7 @@ async fn main() -> Result<()> {
         Commands::Daemon { port, host } => {
             print_banner();
             print_service_start("Daemon");
+            let port = port.unwrap_or(config.gateway.port);
             if port == 0 {
                 tracing::info!("Starting Daemon on {host} (random port)");
             } else {
