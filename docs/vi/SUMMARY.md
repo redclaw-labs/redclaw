@@ -31,6 +31,7 @@
 
 - [operations/README.md](operations/README.md)
 - [operations-runbook.md](operations-runbook.md)
+- [proxy-agent-playbook.md](proxy-agent-playbook.md)
 - [release-process.md](release-process.md)
 - [troubleshooting.md](troubleshooting.md)
 - [network-deployment.md](network-deployment.md)
@@ -70,7 +71,6 @@
 ### 7) Dự án
 
 - [project/README.md](project/README.md)
-- [proxy-agent-playbook.md](proxy-agent-playbook.md)
 
 ## Ngôn ngữ khác
 

@@ -19,6 +19,7 @@
 | 使用 LangGraph 工具调用集成 | [langgraph-integration.md](langgraph-integration.md) |
 | 进行日常运维（runbook） | [operations-runbook.md](operations-runbook.md) |
 | 快速排查安装/运行问题 | [troubleshooting.md](troubleshooting.md) |
+| Matrix 加密房间（E2EE）配置与诊断 | [matrix-e2ee-guide.md](matrix-e2ee-guide.md) |
 | 统一目录导航 | [SUMMARY.md](SUMMARY.md) |
 | 查看 PR/Issue 扫描快照 | [project-triage-snapshot-2026-02-18.md](project-triage-snapshot-2026-02-18.md) |
 

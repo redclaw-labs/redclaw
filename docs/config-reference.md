@@ -23,7 +23,7 @@ Schema export command:
 | Key | Default | Notes |
 |---|---|---|
 | `default_provider` | `openrouter` | provider ID or alias |
-| `default_model` | `anthropic/claude-sonnet-4-6` | model routed through selected provider |
+| `default_model` | `anthropic/claude-sonnet-4.6` | model routed through selected provider |
 | `default_temperature` | `0.7` | model temperature |
 
 ## `[observability]`
@@ -103,7 +103,7 @@ Notes:
 ```toml
 [agents.researcher]
 provider = "openrouter"
-model = "anthropic/claude-sonnet-4-6"
+model = "anthropic/claude-sonnet-4.6"
 system_prompt = "You are a research assistant."
 max_depth = 2
 agentic = true

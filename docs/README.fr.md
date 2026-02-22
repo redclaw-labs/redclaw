@@ -85,7 +85,7 @@ Hubs localisés : [简体中文](README.zh-CN.md) · [日本語](README.ja.md) �
 - Inventaire/classification de la documentation : [docs-inventory.md](docs-inventory.md)
 - Instantané de triage du projet : [project-triage-snapshot-2026-02-18.md](project-triage-snapshot-2026-02-18.md)
 
-## Other languages
+## Autres langues
 
 - English: [README.md](README.md)
 - 简体中文: [README.zh-CN.md](README.zh-CN.md)

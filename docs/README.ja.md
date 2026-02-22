@@ -19,6 +19,7 @@
 | LangGraph ツール連携を使いたい | [langgraph-integration.md](langgraph-integration.md) |
 | 日常運用（runbook）を確認したい | [operations-runbook.md](operations-runbook.md) |
 | インストール/実行トラブルを解決したい | [troubleshooting.md](troubleshooting.md) |
+| Matrix 暗号化ルーム（E2EE）の設定と診断 | [matrix-e2ee-guide.md](matrix-e2ee-guide.md) |
 | 統合 TOC から探したい | [SUMMARY.md](SUMMARY.md) |
 | PR/Issue の現状を把握したい | [project-triage-snapshot-2026-02-18.md](project-triage-snapshot-2026-02-18.md) |
 
