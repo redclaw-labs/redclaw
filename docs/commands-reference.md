@@ -21,6 +21,8 @@ Last verified: **February 20, 2026**.
 | `channel` | Manage channels and channel health checks |
 | `integrations` | Inspect integration details |
 | `skills` | List/install/remove skills |
+| `memory` | Manage agent memory (list/get/stats/clear) |
+| `auth` | Manage provider subscription authentication profiles |
 | `migrate` | Import from external runtimes (currently OpenClaw) |
 | `config` | Export machine-readable config schema |
 | `completions` | Generate shell completion scripts to stdout |
@@ -89,6 +91,33 @@ Notes:
 - `redclaw models refresh --force`
 
 `models refresh` currently supports live catalog refresh for provider IDs: `openrouter`, `openai`, `anthropic`, `groq`, `mistral`, `deepseek`, `xai`, `together-ai`, `gemini`, `ollama`, `llamacpp`, `astrai`, `venice`, `fireworks`, `cohere`, `moonshot`, `glm`, `zai`, `qwen`, and `nvidia`.
+
+### `auth`
+
+- `redclaw auth login --provider openai-codex [--profile <NAME>] [--device-code]`
+- `redclaw auth paste-redirect --provider openai-codex [--profile <NAME>] [--input <URL_OR_CODE>]`
+- `redclaw auth paste-token --provider anthropic [--profile <NAME>] [--token <TOKEN>] [--auth-kind <authorization|api-key>]`
+- `redclaw auth setup-token --provider anthropic [--profile <NAME>]`
+- `redclaw auth refresh --provider openai-codex [--profile <NAME_OR_ID>]`
+- `redclaw auth logout --provider <ID> [--profile <NAME>]`
+- `redclaw auth use --provider <ID> --profile <NAME_OR_ID>`
+- `redclaw auth list`
+- `redclaw auth status`
+
+Notes:
+
+- Subcommands that accept `--profile` default to `default` when omitted.
+
+### `memory`
+
+- `redclaw memory stats`
+- `redclaw memory list [--category <NAME>] [--session <ID>] [--limit <N>] [--offset <N>]`
+- `redclaw memory get <key>`
+- `redclaw memory clear [--key <PREFIX>] [--category <NAME>] [--yes]`
+
+Notes:
+
+- `memory clear` prompts for confirmation unless `--yes` is passed.
 
 ### `channel`
 
