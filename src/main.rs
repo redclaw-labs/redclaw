@@ -222,8 +222,8 @@ Examples:
         port: Option<u16>,
 
         /// Host to bind to
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
+        #[arg(long)]
+        host: Option<String>,
     },
 
     /// Start long-running autonomous runtime (gateway + channels + heartbeat + scheduler)
@@ -248,8 +248,8 @@ Examples:
         port: Option<u16>,
 
         /// Host to bind to
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
+        #[arg(long)]
+        host: Option<String>,
     },
 
     /// Manage OS service lifecycle (launchd/systemd user service)
@@ -812,6 +812,7 @@ async fn main() -> Result<()> {
             print_banner();
             print_service_start("Gateway");
             let port = port.unwrap_or(config.gateway.port);
+            let host = host.unwrap_or_else(|| config.gateway.host.clone());
             if port == 0 {
                 tracing::info!("Starting Gateway on {host} (random port)");
             } else {
@@ -824,6 +825,7 @@ async fn main() -> Result<()> {
             print_banner();
             print_service_start("Daemon");
             let port = port.unwrap_or(config.gateway.port);
+            let host = host.unwrap_or_else(|| config.gateway.host.clone());
             if port == 0 {
                 tracing::info!("Starting Daemon on {host} (random port)");
             } else {
