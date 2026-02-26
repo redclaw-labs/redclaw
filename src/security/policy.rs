@@ -591,14 +591,11 @@ impl SecurityPolicy {
                 .next()
                 .unwrap_or("");
 
-            if base_cmd.is_empty() {
-                continue;
-            }
-
-            if !self
-                .allowed_commands
-                .iter()
-                .any(|allowed| allowed == base_cmd)
+            if !base_cmd.is_empty()
+                && !self
+                    .allowed_commands
+                    .iter()
+                    .any(|allowed| allowed == base_cmd)
             {
                 return false;
             }
