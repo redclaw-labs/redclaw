@@ -13,6 +13,7 @@ repository = "https://github.com/redclaw-labs/redclaw"
 readme = "README.md"
 keywords = ["ai", "agent", "cli", "assistant", "chatbot"]
 categories = ["command-line-utilities", "api-bindings"]
+rust-version = "1.91"
 
 [dependencies]
 # CLI - minimal and fast
@@ -111,7 +112,7 @@ which = "7.0"
 
 # WebSocket client channels (Discord/Lark/DingTalk)
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 regex = "1.10"
 hostname = "0.4.2"
 lettre = { version = "0.11.19", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
@@ -159,7 +160,7 @@ nusb = { version = "0.2", default-features = false, optional = true }
 # Raspberry Pi GPIO / Landlock (Linux only) — target-specific to avoid compile failure on macOS
 [target.'cfg(target_os = "linux")'.dependencies]
 rppal = { version = "0.22", optional = true }
-landlock = { version = "0.4", optional = true }
+landlock = { version = "0.4" }
 
 # Unix-specific dependencies (for root check, etc.)
 [target.'cfg(unix)'.dependencies]
@@ -183,7 +184,7 @@ whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-pr
 
 # Declared to satisfy `check-cfg` / clippy `unexpected_cfgs`.
 sandbox-bubblewrap = []
-sandbox-landlock = ["dep:landlock"]
+sandbox-landlock = []
 browser-native = ["dep:fantoccini"]
 
 [profile.release]
